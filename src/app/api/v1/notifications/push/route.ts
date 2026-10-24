@@ -141,16 +141,22 @@ export async function POST(req: NextRequest) {
 
     // 3. Emitir a Google Wallet REST API
     let googleSuccessCount = 0;
+    const googleErrors: string[] = [];
+
     for (const gp of googlePasses) {
       try {
-        await updateGooglePassStamps(
+        const result = await updateGooglePassStamps(
           gp.pass_serial_number,
           gp.current_stamps || 1,
           `${cleanTitle}: ${cleanMessage}`
         );
-        googleSuccessCount++;
-      } catch (gErr) {
-        console.warn(`[Google Push Error] Falló serial ${gp.pass_serial_number}:`, gErr);
+        if (result.success) {
+          googleSuccessCount++;
+        } else {
+          googleErrors.push(result.error || `Error al actualizar pase ${gp.pass_serial_number}`);
+        }
+      } catch (gErr: any) {
+        googleErrors.push(gErr?.message || `Excepción en pase ${gp.pass_serial_number}`);
       }
     }
 
@@ -171,6 +177,17 @@ export async function POST(req: NextRequest) {
       title: cleanTitle,
       body: cleanMessage,
     });
+
+    // Si fallaron todas las entregas de Google Wallet para un destinatario de Google
+    if (googlePasses.length > 0 && googleSuccessCount === 0) {
+      return NextResponse.json({
+        success: false,
+        error: googleErrors[0] || 'No se pudo comunicar con Google Wallet API.',
+        googleWalletDelivered: 0,
+        appleWalletDelivered: appleSuccessCount,
+        details: googleErrors,
+      }, { status: 422 });
+    }
 
     return NextResponse.json({
       success: true,

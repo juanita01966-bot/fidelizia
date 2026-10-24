@@ -305,10 +305,14 @@ export async function updateGooglePassStamps(
   serialNumber: string,
   newStamps: number,
   message: string
-): Promise<void> {
+): Promise<{ success: boolean; simulated?: boolean; error?: string }> {
   if (!PRIVATE_KEY || PRIVATE_KEY.length < 50) {
-    console.log(`[Google Wallet Simulación]: Actualizando sellos de ${serialNumber} a ${newStamps}. Push: "${message}"`);
-    return;
+    console.warn(`[Google Wallet Simulación]: GOOGLE_PRIVATE_KEY no configurada. Simulado para ${serialNumber}`);
+    return {
+      success: false,
+      simulated: true,
+      error: 'GOOGLE_PRIVATE_KEY no configurada en las variables de entorno de Vercel.',
+    };
   }
 
   const store = getStore();
@@ -318,55 +322,64 @@ export async function updateGooglePassStamps(
   const emptyIcons = '⚪'.repeat(Math.max(0, totalStamps - newStamps));
   const stampsVisual = `${filledIcons}${emptyIcons}`;
 
-  const auth = getGoogleAuth();
-  const client = await auth.getClient();
-  const objectId = `${ISSUER_ID}.${serialNumber}`;
-  const url = `https://walletobjects.googleapis.com/walletobjects/v1/loyaltyObject/${objectId}?updateMask=loyaltyPoints,secondaryLoyaltyPoints,messages,heroImage`;
-
-  const heroImageUrl = 'https://images.unsplash.com/photo-1501339847302-ac426a4a7cbb?w=1032&auto=format&fit=crop&q=80';
-
-  const patchPayload = {
-    heroImage: {
-      sourceUri: {
-        uri: heroImageUrl,
-      },
-      contentDescription: {
-        defaultValue: { language: 'es-CO', value: `${store.merchant.name || 'Café Canelo'} Banner` },
-      },
-    },
-    loyaltyPoints: {
-      label: isRewardReady ? '🎉 ¡PREMIO DESBLOQUEADO!' : `Progreso de Sellos (${newStamps}/${totalStamps})`,
-      balance: {
-        string: isRewardReady ? `🏆 ${newStamps}/${totalStamps} SELLOS COMPLETOS` : `${stampsVisual} (${newStamps}/${totalStamps})`,
-      },
-    },
-    secondaryLoyaltyPoints: {
-      label: isRewardReady ? 'Premio Reclamable' : 'Meta de Recompensa',
-      balance: {
-        string: isRewardReady 
-          ? (store.merchant.reward_description || 'Premio de Autor Listo') 
-          : `${totalStamps - newStamps} sellos para: ${store.merchant.reward_description || 'Premio'}`,
-      },
-    },
-    messages: [
-      {
-        id: `msg-${Date.now()}`,
-        header: isRewardReady ? '🎉 ¡PREMIO LISTO PARA RECLAMAR!' : (store.merchant.name || 'Café Canelo & Specialty Roasters'),
-        body: message,
-        messageType: 'TEXT_AND_NOTIFY', // Dispara notificación push en la pantalla de bloqueo de Android
-      },
-    ],
-  };
-
   try {
+    const auth = getGoogleAuth();
+    const client = await auth.getClient();
+    const objectId = `${ISSUER_ID}.${serialNumber}`;
+    const url = `https://walletobjects.googleapis.com/walletobjects/v1/loyaltyObject/${objectId}?updateMask=loyaltyPoints,secondaryLoyaltyPoints,messages,heroImage`;
+
+    const heroImageUrl = 'https://images.unsplash.com/photo-1501339847302-ac426a4a7cbb?w=1032&auto=format&fit=crop&q=80';
+
+    const patchPayload = {
+      heroImage: {
+        sourceUri: {
+          uri: heroImageUrl,
+        },
+        contentDescription: {
+          defaultValue: { language: 'es-CO', value: `${store.merchant.name || 'Café Canelo'} Banner` },
+        },
+      },
+      loyaltyPoints: {
+        label: isRewardReady ? '🎉 ¡PREMIO DESBLOQUEADO!' : `Progreso de Sellos (${newStamps}/${totalStamps})`,
+        balance: {
+          string: isRewardReady ? `🏆 ${newStamps}/${totalStamps} SELLOS COMPLETOS` : `${stampsVisual} (${newStamps}/${totalStamps})`,
+        },
+      },
+      secondaryLoyaltyPoints: {
+        label: isRewardReady ? 'Premio Reclamable' : 'Meta de Recompensa',
+        balance: {
+          string: isRewardReady 
+            ? (store.merchant.reward_description || 'Premio de Autor Listo') 
+            : `${totalStamps - newStamps} sellos para: ${store.merchant.reward_description || 'Premio'}`,
+        },
+      },
+      messages: [
+        {
+          id: `msg-${Date.now()}`,
+          header: isRewardReady ? '🎉 ¡PREMIO LISTO PARA RECLAMAR!' : (store.merchant.name || 'Café Canelo & Specialty Roasters'),
+          body: message,
+          messageType: 'TEXT_AND_NOTIFY', // Dispara notificación push en la pantalla de bloqueo de Android
+        },
+      ],
+    };
+
     await client.request({
       url,
       method: 'PATCH',
       data: patchPayload,
     });
     console.log(`[Google Wallet Sync OK]: Pase ${serialNumber} actualizado a ${newStamps} sellos. Push emitido: "${message}"`);
-  } catch (err) {
-    console.warn('[Google Wallet PATCH Error]:', err);
+    return { success: true };
+  } catch (err: any) {
+    const apiError = err?.response?.data?.error?.message || err?.message || 'Error desconocido';
+    const status = err?.response?.status;
+    console.warn(`[Google Wallet PATCH Error ${status}]:`, apiError);
+    return {
+      success: false,
+      error: status === 404
+        ? `El pase (${serialNumber}) aún no ha sido añadido a Google Wallet en el celular, o no existe en Google.`
+        : `Google Wallet API (${status || 'Error'}): ${apiError}`,
+    };
   }
 }
 
@@ -377,22 +390,28 @@ export async function broadcastGoogleWalletNotification(
   serials: string[],
   title: string,
   body: string
-): Promise<{ successCount: number; failureCount: number }> {
+): Promise<{ successCount: number; failureCount: number; errors: string[] }> {
   let successCount = 0;
   let failureCount = 0;
+  const errors: string[] = [];
 
   for (const serial of serials) {
     try {
       const store = getStore();
       const pass = store.passes.find((p) => p.pass_serial_number === serial);
       const stamps = pass ? pass.current_stamps : 1;
-      await updateGooglePassStamps(serial, stamps, `${title}: ${body}`);
-      successCount++;
-    } catch (e) {
-      console.warn(`[Broadcast Error] Falló notificación para serial ${serial}:`, e);
+      const res = await updateGooglePassStamps(serial, stamps, `${title}: ${body}`);
+      if (res.success) {
+        successCount++;
+      } else {
+        failureCount++;
+        if (res.error) errors.push(res.error);
+      }
+    } catch (e: any) {
       failureCount++;
+      errors.push(e?.message || 'Error en broadcast');
     }
   }
 
-  return { successCount, failureCount };
+  return { successCount, failureCount, errors };
 }
