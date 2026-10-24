@@ -1,18 +1,43 @@
 'use client';
 
-import React, { useState } from 'react';
-import { Users, Search, Phone, Calendar, Sparkles, Smartphone, CheckCircle2 } from 'lucide-react';
+import React, { useState, useEffect } from 'react';
+import { Users, Search, Phone, Calendar, Sparkles, Smartphone, CheckCircle2, RefreshCw } from 'lucide-react';
 import { Card, CardHeader, CardTitle, CardDescription, CardContent } from '@/components/ui/Card';
 import { Badge } from '@/components/ui/Badge';
 import { Button } from '@/components/ui/Button';
 import { getStore } from '@/lib/store/fidelizia-store';
+import { Customer } from '@/types/domain';
 
 export default function CustomersPage() {
   const store = getStore();
+  const [customers, setCustomers] = useState<Customer[]>(store.customers);
   const [searchTerm, setSearchTerm] = useState('');
   const [selectedSegment, setSelectedSegment] = useState<string>('all');
+  const [isSyncing, setIsSyncing] = useState(false);
 
-  const filteredCustomers = store.customers.filter((c) => {
+  const fetchCustomers = async () => {
+    try {
+      setIsSyncing(true);
+      const res = await fetch('/api/v1/customers');
+      if (res.ok) {
+        const data = await res.json();
+        if (data.customers) {
+          store.syncFromRemote({ customers: data.customers, passes: data.passes });
+          setCustomers([...store.customers]);
+        }
+      }
+    } catch (e) {
+      console.warn('Error fetching customers:', e);
+    } finally {
+      setIsSyncing(false);
+    }
+  };
+
+  useEffect(() => {
+    fetchCustomers();
+  }, []);
+
+  const filteredCustomers = customers.filter((c) => {
     const matchesSearch =
       c.full_name.toLowerCase().includes(searchTerm.toLowerCase()) ||
       c.phone.includes(searchTerm);
@@ -34,6 +59,17 @@ export default function CustomersPage() {
         </div>
 
         <div className="flex items-center gap-2">
+          <Button
+            variant="secondary"
+            size="sm"
+            onClick={() => fetchCustomers()}
+            disabled={isSyncing}
+            className="text-xs border border-white/10"
+            title="Sincronizar con Supabase"
+          >
+            <RefreshCw className={`w-3.5 h-3.5 mr-1 ${isSyncing ? 'animate-spin text-purple-400' : ''}`} />
+            {isSyncing ? 'Sincronizando...' : 'Sincronizar'}
+          </Button>
           <div className="relative">
             <Search className="w-4 h-4 text-zinc-400 absolute left-3 top-2.5" />
             <input

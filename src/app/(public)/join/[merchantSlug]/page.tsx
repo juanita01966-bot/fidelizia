@@ -60,9 +60,18 @@ export default function JoinPage() {
     currentStamps: number;
   } | null>(null);
 
-  // Billetera Oficial Configurada: Google Wallet
+  // Billetera Oficial Configurada: Google Wallet y Sincronización de Merchant
   useEffect(() => {
     setSelectedPassType('google');
+
+    fetch('/api/v1/merchant/settings')
+      .then((res) => res.json())
+      .then((data) => {
+        if (data?.merchant) {
+          store.updateMerchantSettings(data.merchant);
+        }
+      })
+      .catch((e) => console.warn('Error fetching merchant settings:', e));
   }, []);
 
   const handleSubmit = (e: React.FormEvent) => {
@@ -81,37 +90,88 @@ export default function JoinPage() {
     // Asegurar formato E.164
     const formattedPhone = phone.startsWith('+') ? phone : `+57${phone.replace(/\D/g, '')}`;
 
-    try {
-      const { customer, pass } = store.registerCustomer({
-        fullName: fullName.trim(),
-        phone: formattedPhone,
-        birthdate: birthdate || null,
-        passType: selectedPassType,
-      });
+    const executeRegistration = async () => {
+      try {
+        // 1. Petición al backend central conectado a Supabase
+        const response = await fetch('/api/v1/customers/register', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            fullName: fullName.trim(),
+            phone: formattedPhone,
+            birthdate: birthdate || null,
+            passType: selectedPassType,
+            merchantSlug: slug,
+          }),
+        });
 
-      setRegisteredData({
-        customerName: customer.full_name,
-        serialNumber: pass.pass_serial_number,
-        currentStamps: pass.current_stamps || 1,
-      });
+        let customerData: any;
+        let passData: any;
 
-      setIsRegistered(true);
-      soundEngine.playRedeemCelebration();
+        if (response.ok) {
+          const resJson = await response.json();
+          customerData = resJson.customer;
+          passData = resJson.pass;
+          // Sincronizar en el store local del cliente
+          store.registerCustomer({
+            fullName: customerData.full_name,
+            phone: customerData.phone,
+            birthdate: customerData.birthdate,
+            passType: passData.pass_type,
+          });
+        } else {
+          // Fallback a registro local si el endpoint falla
+          const local = store.registerCustomer({
+            fullName: fullName.trim(),
+            phone: formattedPhone,
+            birthdate: birthdate || null,
+            passType: selectedPassType,
+          });
+          customerData = local.customer;
+          passData = local.pass;
+        }
 
-      // Disparo de confeti de celebración
-      confetti({
-        particleCount: 80,
-        spread: 60,
-        origin: { y: 0.6 },
-        colors: ['#8b5cf6', '#d4a373', '#10b981'],
-      });
+        setRegisteredData({
+          customerName: customerData.full_name,
+          serialNumber: passData.pass_serial_number,
+          currentStamps: passData.current_stamps || 1,
+        });
 
-      toast.success('¡Tarjeta digital generada con éxito!', {
-        description: 'Hemos sumado tu primer sello de bienvenida.',
-      });
-    } catch (err: unknown) {
-      toast.error(err instanceof Error ? err.message : 'Error al registrar cliente');
-    }
+        setIsRegistered(true);
+        soundEngine.playRedeemCelebration();
+
+        // Disparo de confeti de celebración
+        confetti({
+          particleCount: 80,
+          spread: 60,
+          origin: { y: 0.6 },
+          colors: ['#8b5cf6', '#d4a373', '#10b981'],
+        });
+
+        toast.success('¡Tarjeta digital generada con éxito!', {
+          description: 'Hemos sumado tu primer sello de bienvenida.',
+        });
+      } catch (err: unknown) {
+        // Fallback resiliente
+        const local = store.registerCustomer({
+          fullName: fullName.trim(),
+          phone: formattedPhone,
+          birthdate: birthdate || null,
+          passType: selectedPassType,
+        });
+
+        setRegisteredData({
+          customerName: local.customer.full_name,
+          serialNumber: local.pass.pass_serial_number,
+          currentStamps: local.pass.current_stamps || 1,
+        });
+
+        setIsRegistered(true);
+        toast.success('¡Tarjeta digital generada con éxito!');
+      }
+    };
+
+    executeRegistration();
   };
 
   return (

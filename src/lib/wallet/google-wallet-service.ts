@@ -46,10 +46,7 @@ export async function ensureGoogleLoyaltyClass(): Promise<void> {
 
   const store = getStore();
   const merchant = store.merchant;
-  const isSingleCard = merchant.loyalty_program_mode === 'single_card';
-  const hexBg = isSingleCard 
-    ? (merchant.card_gradient?.from || merchant.brand_color || '#140f0c')
-    : '#140f0c';
+  const hexBg = merchant.card_gradient?.from || merchant.brand_color || '#8b5cf6';
 
   const heroImageUrl = 'https://images.unsplash.com/photo-1501339847302-ac426a4a7cbb?w=1032&auto=format&fit=crop&q=80';
 
@@ -87,7 +84,7 @@ export async function ensureGoogleLoyaltyClass(): Promise<void> {
     const existing = await client.request({ url, method: 'GET' });
     if (existing.status === 200) {
       await client.request({
-        url: `${url}?updateMask=heroImage,hexBackgroundColor,programLogo,issuerName,programName`,
+        url: `${url}?updateMask=heroImage,hexBackgroundColor,programLogo,issuerName,programName,reviewStatus`,
         method: 'PATCH',
         data: classPayload,
       });
@@ -109,6 +106,59 @@ export async function ensureGoogleLoyaltyClass(): Promise<void> {
 }
 
 /**
+ * Actualiza en caliente el diseño visual (color de fondo hex, nombre, logo, hero) en la clase de Google Wallet.
+ * Google Wallet propaga automáticamente los cambios a todas las tarjetas emitidas a los teléfonos de los clientes.
+ */
+export async function updateGoogleLoyaltyClassDesign(options?: {
+  hexBackgroundColor?: string;
+  issuerName?: string;
+  programName?: string;
+  heroImageUrl?: string;
+}): Promise<{ success: boolean; hexBackgroundColor?: string }> {
+  if (!PRIVATE_KEY || PRIVATE_KEY.length < 50) {
+    console.log('[Google Wallet Simulación]: Actualización de diseño en clase simulada.');
+    return { success: true, hexBackgroundColor: options?.hexBackgroundColor };
+  }
+
+  const auth = getGoogleAuth();
+  const client = await auth.getClient();
+  const url = `https://walletobjects.googleapis.com/walletobjects/v1/loyaltyClass/${CLASS_ID}`;
+
+  const store = getStore();
+  const merchant = store.merchant;
+  const hexBg = options?.hexBackgroundColor || merchant.card_gradient?.from || merchant.brand_color || '#8b5cf6';
+  const issuerName = options?.issuerName || merchant.name || 'Café Canelo & Specialty Roasters';
+  const programName = options?.programName || 'Club Canelo - Fidelidad';
+  const heroImageUrl = options?.heroImageUrl || 'https://images.unsplash.com/photo-1501339847302-ac426a4a7cbb?w=1032&auto=format&fit=crop&q=80';
+
+  const patchPayload = {
+    hexBackgroundColor: hexBg,
+    reviewStatus: 'UNDER_REVIEW',
+    issuerName,
+    programName,
+    heroImage: {
+      sourceUri: { uri: heroImageUrl },
+      contentDescription: {
+        defaultValue: { language: 'es-CO', value: `${issuerName} Banner` },
+      },
+    },
+  };
+
+  try {
+    const response = await client.request({
+      url: `${url}?updateMask=hexBackgroundColor,reviewStatus,issuerName,programName,heroImage`,
+      method: 'PATCH',
+      data: patchPayload,
+    });
+    console.log(`[Google Wallet Sync OK]: Clase ${CLASS_ID} actualizada en Google. Nuevo color: ${hexBg}`);
+    return { success: true, hexBackgroundColor: hexBg };
+  } catch (err) {
+    console.warn('[Google Wallet Design Update Error]:', err);
+    return { success: false, hexBackgroundColor: hexBg };
+  }
+}
+
+/**
  * Crea el LoyaltyObject con el QR del serial, lo firma con RS256 y devuelve la URL de guardado.
  * Integra la arquitectura dual ('single_card' vs 'multi_tier') y la Escalera de Premios por Hitos.
  */
@@ -119,9 +169,7 @@ export async function generateGoogleWalletSaveUrl(
   const store = getStore();
   const merchant = store.merchant;
   const isSingleCard = merchant.loyalty_program_mode === 'single_card';
-  const hexBg = isSingleCard 
-    ? (merchant.card_gradient?.from || merchant.brand_color || '#140f0c')
-    : '#140f0c';
+  const hexBg = merchant.card_gradient?.from || merchant.brand_color || '#8b5cf6';
 
   const objectId = `${ISSUER_ID}.${pass.pass_serial_number}`;
 

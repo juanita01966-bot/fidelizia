@@ -37,7 +37,8 @@ import {
   Sparkle,
   Square,
   SlidersHorizontal,
-  Award
+  Award,
+  RefreshCw
 } from 'lucide-react';
 import { Badge } from '@/components/ui/Badge';
 import { Button } from '@/components/ui/Button';
@@ -258,6 +259,47 @@ export function UnifiedDashboard() {
     };
   }, [sessionManager, store]);
 
+  // Sincronización transparente con Supabase y Backend
+  const [isSyncingRemote, setIsSyncingRemote] = useState(false);
+
+  const fetchRemoteData = async (silent = false) => {
+    try {
+      setIsSyncingRemote(true);
+      // 1. Obtener clientes de Supabase
+      const custRes = await fetch('/api/v1/customers');
+      if (custRes.ok) {
+        const custData = await custRes.json();
+        if (custData.customers) {
+          store.syncFromRemote({ customers: custData.customers, passes: custData.passes });
+          setCustomers([...store.customers]);
+          setPasses([...store.passes]);
+        }
+      }
+
+      // 2. Obtener configuraciones del merchant
+      const merchRes = await fetch('/api/v1/merchant/settings');
+      if (merchRes.ok) {
+        const merchData = await merchRes.json();
+        if (merchData.merchant) {
+          store.syncFromRemote({ merchant: merchData.merchant });
+          setMerchant({ ...store.merchant });
+        }
+      }
+      if (!silent) {
+        soundEngine.playScanSuccess();
+        toast.success('Directorio y configuraciones sincronizados con Supabase.');
+      }
+    } catch (e) {
+      console.warn('Error fetching remote data in UnifiedDashboard:', e);
+    } finally {
+      setIsSyncingRemote(false);
+    }
+  };
+
+  useEffect(() => {
+    fetchRemoteData(true);
+  }, []);
+
   const isAdmin = session.role === 'admin';
 
   // Métricas financieras calculadas (Solo Admin)
@@ -280,7 +322,7 @@ export function UnifiedDashboard() {
   };
 
   // 1. REGISTRO IN-SITU DE NUEVO CLIENTE (SIN SALIR DEL DSB)
-  const handleRegisterCustomerInSitu = (e: React.FormEvent) => {
+  const handleRegisterCustomerInSitu = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!regFullName.trim() || regFullName.trim().length < 3) {
       toast.error('El nombre debe tener al menos 3 caracteres');
@@ -292,23 +334,54 @@ export function UnifiedDashboard() {
     }
 
     try {
-      const { customer, pass } = store.registerCustomer({
-        fullName: regFullName.trim(),
-        phone: regPhone.trim(),
-        birthdate: regBirthdate || null,
-        passType: regPassType,
+      // 1. Petición al backend central conectado a Supabase
+      const response = await fetch('/api/v1/customers/register', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          fullName: regFullName.trim(),
+          phone: regPhone.trim(),
+          birthdate: regBirthdate || null,
+          passType: regPassType,
+          merchantSlug: store.merchant.slug,
+        }),
       });
+
+      let customerName = regFullName.trim();
+      let passSerial = `PASS-CANELO-${Date.now().toString().slice(-4)}`;
+
+      if (response.ok) {
+        const resJson = await response.json();
+        customerName = resJson.customer.full_name;
+        passSerial = resJson.pass.pass_serial_number;
+        store.registerCustomer({
+          fullName: customerName,
+          phone: regPhone.trim(),
+          birthdate: regBirthdate || null,
+          passType: regPassType,
+        });
+      } else {
+        const local = store.registerCustomer({
+          fullName: regFullName.trim(),
+          phone: regPhone.trim(),
+          birthdate: regBirthdate || null,
+          passType: regPassType,
+        });
+        customerName = local.customer.full_name;
+        passSerial = local.pass.pass_serial_number;
+      }
 
       soundEngine.playRedeemCelebration();
       confetti({ particleCount: 60, spread: 70 });
       toast.success(`¡Cliente registrado con éxito en el sistema!`, {
-        description: `${customer.full_name} (${pass.pass_serial_number}) · Pase ${regPassType === 'apple' ? 'Apple' : 'Google'} Wallet activo.`,
+        description: `${customerName} (${passSerial}) · Pase ${regPassType === 'apple' ? 'Apple' : 'Google'} Wallet activo.`,
       });
 
       setIsRegisterCustomerOpen(false);
       setRegFullName('');
       setRegPhone('+573');
       setRegBirthdate('');
+      fetchRemoteData(true);
     } catch (err: unknown) {
       toast.error(err instanceof Error ? err.message : 'Error al registrar cliente');
     }
@@ -407,9 +480,9 @@ export function UnifiedDashboard() {
     }
   };
 
-  // 5. GUARDAR DISEÑO ULTRA-PREMIUM DE TARJETA EN CALIENTE
-  const handleSaveCardDesign = () => {
-    store.updateMerchantSettings({
+  // 5. GUARDAR DISEÑO ULTRA-PREMIUM DE TARJETA EN CALIENTE (CON SINCRONIZACIÓN EN GOOGLE WALLET API)
+  const handleSaveCardDesign = async () => {
+    const payload = {
       brand_color: brandColorInput,
       stamps_needed: Number(stampsNeededInput),
       reward_description: rewardDescInput.trim(),
@@ -420,9 +493,39 @@ export function UnifiedDashboard() {
       card_morphology: cardMorphologyInput,
       card_gradient: cardGradientInput,
       reward_milestones: rewardMilestonesInput,
-    });
-    soundEngine.playScanSuccess();
-    toast.success('Diseño ultra-premium y premios de tarjeta guardados y sincronizados en tiempo real.');
+    };
+
+    // Actualización reactiva inmediata en local
+    store.updateMerchantSettings(payload);
+
+    const toastId = toast.loading('Sincronizando diseño con Supabase y Google Wallet API...');
+    try {
+      const res = await fetch('/api/v1/merchant/settings', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+
+      if (res.ok) {
+        const data = await res.json();
+        soundEngine.playScanSuccess();
+        toast.success(
+          data.googleWalletSync 
+            ? '¡Diseño propagado a Google Wallet y Supabase con éxito!'
+            : 'Diseño guardado en Supabase (Google Wallet operando en modo local)',
+          {
+            id: toastId,
+            description: 'Las tarjetas de fidelización en los teléfonos de tus clientes se actualizarán automáticamente.',
+          }
+        );
+      } else {
+        soundEngine.playScanSuccess();
+        toast.success('Diseño guardado localmente en tu navegador.', { id: toastId });
+      }
+    } catch (err: unknown) {
+      soundEngine.playScanSuccess();
+      toast.success('Diseño guardado en memoria local.', { id: toastId });
+    }
   };
 
   const handleAddMilestone = () => {
@@ -963,6 +1066,17 @@ export function UnifiedDashboard() {
                 </p>
               </div>
               <div className="flex items-center gap-2">
+                <Button 
+                  variant="secondary" 
+                  size="sm"
+                  onClick={() => fetchRemoteData()}
+                  disabled={isSyncingRemote}
+                  className="text-xs border border-white/10 hover:border-purple-400/40"
+                  title="Recarga en tiempo real los clientes y tarjetas registrados desde Supabase"
+                >
+                  <RefreshCw className={cn("w-3.5 h-3.5 mr-1.5", isSyncingRemote && "animate-spin text-purple-400")} />
+                  {isSyncingRemote ? 'Sincronizando...' : 'Sincronizar Supabase'}
+                </Button>
                 <Button 
                   variant="primary" 
                   size="sm"

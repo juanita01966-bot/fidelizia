@@ -1076,6 +1076,45 @@ export class FideliziaStore {
     return pass;
   }
 
+  // Sincronización transparente desde Supabase hacia la memoria / localStorage
+  public syncFromRemote(payload: { customers?: Customer[]; passes?: WalletPass[]; merchant?: Partial<Merchant> }) {
+    if (payload.customers && payload.customers.length > 0) {
+      const existingIds = new Set(this.customers.map((c) => c.id));
+      const existingPhones = new Set(this.customers.map((c) => c.phone));
+      for (const remoteCust of payload.customers) {
+        if (!existingIds.has(remoteCust.id) && !existingPhones.has(remoteCust.phone)) {
+          this.customers.unshift(remoteCust);
+        } else {
+          const idx = this.customers.findIndex((c) => c.id === remoteCust.id || c.phone === remoteCust.phone);
+          if (idx !== -1) {
+            this.customers[idx] = { ...this.customers[idx], ...remoteCust };
+          }
+        }
+      }
+    }
+
+    if (payload.passes && payload.passes.length > 0) {
+      const existingSerials = new Set(this.passes.map((p) => p.pass_serial_number));
+      for (const remotePass of payload.passes) {
+        if (!existingSerials.has(remotePass.pass_serial_number)) {
+          this.passes.unshift(remotePass);
+        } else {
+          const idx = this.passes.findIndex((p) => p.pass_serial_number === remotePass.pass_serial_number);
+          if (idx !== -1) {
+            this.passes[idx] = { ...this.passes[idx], ...remotePass };
+          }
+        }
+      }
+    }
+
+    if (payload.merchant) {
+      this.merchant = { ...this.merchant, ...payload.merchant };
+    }
+
+    this.persist();
+    this.notify();
+  }
+
   // Utilidad Haversine para cálculo de distancia en metros
   private calculateDistance(lat1: number, lon1: number, lat2: number, lon2: number): number {
     const R = 6371000;
