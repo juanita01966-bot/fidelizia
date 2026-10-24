@@ -10,8 +10,27 @@ const SERVICE_ACCOUNT_EMAIL =
   process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL || 
   'fidelizia-359@dynamind-509920.iam.gserviceaccount.com';
 
-const RAW_KEY = process.env.GOOGLE_PRIVATE_KEY || '';
-const PRIVATE_KEY = RAW_KEY.replace(/\\n/g, '\n');
+export function getGooglePrivateKey(): string {
+  const raw = process.env.GOOGLE_PRIVATE_KEY || '';
+  if (!raw) return '';
+  let cleaned = raw.trim();
+  // Quitar comillas envolventes si Vercel o el usuario las pegaron
+  if ((cleaned.startsWith('"') && cleaned.endsWith('"')) || (cleaned.startsWith("'") && cleaned.endsWith("'"))) {
+    cleaned = cleaned.slice(1, -1).trim();
+  }
+  return cleaned.replace(/\\n/g, '\n');
+}
+
+export function getGoogleWalletDiagnostics() {
+  const pk = getGooglePrivateKey();
+  return {
+    issuerId: process.env.GOOGLE_ISSUER_ID || ISSUER_ID,
+    serviceAccountEmail: process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL || SERVICE_ACCOUNT_EMAIL,
+    hasPrivateKey: Boolean(pk && pk.length > 50),
+    privateKeyLength: pk.length,
+    privateKeyValidFormat: pk.includes('-----BEGIN PRIVATE KEY-----') && pk.includes('-----END PRIVATE KEY-----'),
+  };
+}
 
 const CLASS_SUFFIX = 'canelo_loyalty_v1';
 const CLASS_ID = `${ISSUER_ID}.${CLASS_SUFFIX}`;
@@ -19,14 +38,15 @@ const CLASS_ID = `${ISSUER_ID}.${CLASS_SUFFIX}`;
 let cachedAuth: GoogleAuth | null = null;
 
 function getGoogleAuth(): GoogleAuth {
+  const pk = getGooglePrivateKey();
   if (!cachedAuth) {
-    if (!PRIVATE_KEY || PRIVATE_KEY.length < 50) {
+    if (!pk || pk.length < 50) {
       console.warn('[Google Wallet] GOOGLE_PRIVATE_KEY no configurada. Las firmas locales operarán en modo degradado.');
     }
     cachedAuth = new GoogleAuth({
       credentials: {
         client_email: SERVICE_ACCOUNT_EMAIL,
-        private_key: PRIVATE_KEY,
+        private_key: pk,
       },
       scopes: ['https://www.googleapis.com/auth/wallet_object.issuer'],
     });
@@ -38,7 +58,8 @@ function getGoogleAuth(): GoogleAuth {
  * Asegura que la clase LoyaltyClass exista en Google Wallet antes de emitir pases.
  */
 export async function ensureGoogleLoyaltyClass(): Promise<void> {
-  if (!PRIVATE_KEY || PRIVATE_KEY.length < 50) return;
+  const privateKey = getGooglePrivateKey();
+  if (!privateKey || privateKey.length < 50) return;
 
   const auth = getGoogleAuth();
   const client = await auth.getClient();
@@ -115,7 +136,8 @@ export async function updateGoogleLoyaltyClassDesign(options?: {
   programName?: string;
   heroImageUrl?: string;
 }): Promise<{ success: boolean; hexBackgroundColor?: string }> {
-  if (!PRIVATE_KEY || PRIVATE_KEY.length < 50) {
+  const privateKey = getGooglePrivateKey();
+  if (!privateKey || privateKey.length < 50) {
     console.log('[Google Wallet Simulación]: Actualización de diseño en clase simulada.');
     return { success: true, hexBackgroundColor: options?.hexBackgroundColor };
   }
@@ -288,13 +310,15 @@ export async function generateGoogleWalletSaveUrl(
     },
   };
 
+  const privateKey = getGooglePrivateKey();
+
   // Fallback amigable para demo local si no hay certificados
-  if (!PRIVATE_KEY || PRIVATE_KEY.length < 50) {
+  if (!privateKey || privateKey.length < 50) {
     const dummyJwt = Buffer.from(JSON.stringify(claims)).toString('base64');
     return `https://pay.google.com/gp/v/save/${dummyJwt}`;
   }
 
-  const token = jwt.sign(claims, PRIVATE_KEY, { algorithm: 'RS256' });
+  const token = jwt.sign(claims, privateKey, { algorithm: 'RS256' });
   return `https://pay.google.com/gp/v/save/${token}`;
 }
 
@@ -306,7 +330,8 @@ export async function updateGooglePassStamps(
   newStamps: number,
   message: string
 ): Promise<{ success: boolean; simulated?: boolean; error?: string }> {
-  if (!PRIVATE_KEY || PRIVATE_KEY.length < 50) {
+  const privateKey = getGooglePrivateKey();
+  if (!privateKey || privateKey.length < 50) {
     console.warn(`[Google Wallet Simulación]: GOOGLE_PRIVATE_KEY no configurada. Simulado para ${serialNumber}`);
     return {
       success: false,

@@ -2,8 +2,21 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { fideliziaStore } from '@/lib/store/fidelizia-store';
 import { supabaseAdmin } from '@/lib/supabase/server';
-import { broadcastGoogleWalletNotification, updateGooglePassStamps } from '@/lib/wallet/google-wallet-service';
+import { 
+  broadcastGoogleWalletNotification, 
+  updateGooglePassStamps,
+  getGoogleWalletDiagnostics 
+} from '@/lib/wallet/google-wallet-service';
 import { sendApplePushNotification } from '@/lib/wallet/apple-wallet-service';
+
+export async function GET() {
+  const diag = getGoogleWalletDiagnostics();
+  return NextResponse.json({
+    status: 'ok',
+    googleWallet: diag,
+    serverTime: new Date().toISOString(),
+  });
+}
 
 export async function POST(req: NextRequest) {
   try {
