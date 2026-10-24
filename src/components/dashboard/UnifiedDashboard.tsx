@@ -307,27 +307,8 @@ export function UnifiedDashboard() {
       if (store.merchant.preconfigured_rewards) {
         setPromoOptions(store.merchant.preconfigured_rewards);
       }
-      if (store.merchant.card_pattern) {
-        setCardPatternInput(store.merchant.card_pattern);
-      }
-      if (typeof store.merchant.show_emv_chip === 'boolean') {
-        setShowEmvChipInput(store.merchant.show_emv_chip);
-      }
-      if (typeof store.merchant.show_hologram === 'boolean') {
-        setShowHologramInput(store.merchant.show_hologram);
-      }
-      if (store.merchant.loyalty_program_mode) {
-        setLoyaltyProgramModeInput(store.merchant.loyalty_program_mode);
-      }
-      if (store.merchant.card_morphology) {
-        setCardMorphologyInput(store.merchant.card_morphology);
-      }
-      if (store.merchant.card_gradient) {
-        setCardGradientInput(store.merchant.card_gradient);
-      }
-      if (store.merchant.reward_milestones) {
-        setRewardMilestonesInput(store.merchant.reward_milestones);
-      }
+      // NOTA: Los inputs de diseño (cardPattern, cardMorphology, cardGradient, etc.)
+      // NO se sobreescriben aquí para permitir que el usuario edite sin reseteos automáticos.
     });
 
     return () => {
@@ -339,10 +320,10 @@ export function UnifiedDashboard() {
   // Sincronización transparente con Supabase y Backend
   const [isSyncingRemote, setIsSyncingRemote] = useState(false);
 
-  const fetchRemoteData = async (silent = false) => {
+  const fetchRemoteData = async (silent = false, syncMerchant = false) => {
     try {
       setIsSyncingRemote(true);
-      // 1. Obtener clientes de Supabase
+      // 1. Obtener clientes de Supabase (Siempre)
       const custRes = await fetch('/api/v1/customers');
       if (custRes.ok) {
         const custData = await custRes.json();
@@ -353,13 +334,28 @@ export function UnifiedDashboard() {
         }
       }
 
-      // 2. Obtener configuraciones del merchant
-      const merchRes = await fetch('/api/v1/merchant/settings');
-      if (merchRes.ok) {
-        const merchData = await merchRes.json();
-        if (merchData.merchant) {
-          store.syncFromRemote({ merchant: merchData.merchant });
-          setMerchant({ ...store.merchant });
+      // 2. Obtener configuraciones del merchant SOLO si syncMerchant es true (al inicio o manual)
+      if (syncMerchant) {
+        const merchRes = await fetch('/api/v1/merchant/settings');
+        if (merchRes.ok) {
+          const merchData = await merchRes.json();
+          if (merchData.merchant) {
+            store.syncFromRemote({ merchant: merchData.merchant });
+            setMerchant({ ...store.merchant });
+
+            // Sincronizar inputs del formulario de diseño de la tarjeta
+            const m = merchData.merchant;
+            if (m.card_pattern) setCardPatternInput(m.card_pattern);
+            if (typeof m.show_emv_chip === 'boolean') setShowEmvChipInput(m.show_emv_chip);
+            if (typeof m.show_hologram === 'boolean') setShowHologramInput(m.show_hologram);
+            if (m.loyalty_program_mode) setLoyaltyProgramModeInput(m.loyalty_program_mode);
+            if (m.card_morphology) setCardMorphologyInput(m.card_morphology);
+            if (m.card_gradient) setCardGradientInput(m.card_gradient);
+            if (m.reward_milestones) setRewardMilestonesInput(m.reward_milestones);
+            if (m.brand_color) setBrandColorInput(m.brand_color);
+            if (m.stamps_needed) setStampsNeededInput(m.stamps_needed);
+            if (m.reward_description) setRewardDescInput(m.reward_description);
+          }
         }
       }
       if (!silent) {
@@ -375,8 +371,8 @@ export function UnifiedDashboard() {
 
   // Sincronización continua en tiempo real (Supabase Realtime + Polling Inteligente + BroadcastChannel)
   useEffect(() => {
-    // 1. Carga inicial
-    fetchRemoteData(true);
+    // 1. Carga inicial (Sincroniza clientes y configuración de merchant)
+    fetchRemoteData(true, true);
 
     // 2. Supabase Realtime WebSocket Listener (para comensales desde celulares remotos)
     let channel: any = null;
@@ -387,7 +383,7 @@ export function UnifiedDashboard() {
           'postgres_changes',
           { event: '*', schema: 'public', table: 'customers' },
           (payload: any) => {
-            fetchRemoteData(true);
+            fetchRemoteData(true, false);
             if (payload?.eventType === 'INSERT' && payload.new) {
               soundEngine.playScanSuccess();
               toast.success(`🎉 ¡Nuevo cliente en tiempo real: ${payload.new.full_name || 'Comensal'}!`, {
@@ -400,14 +396,14 @@ export function UnifiedDashboard() {
           'postgres_changes',
           { event: '*', schema: 'public', table: 'wallet_passes' },
           () => {
-            fetchRemoteData(true);
+            fetchRemoteData(true, false);
           }
         )
         .on(
           'postgres_changes',
           { event: '*', schema: 'public', table: 'merchants' },
           () => {
-            fetchRemoteData(true);
+            fetchRemoteData(true, true);
           }
         )
         .subscribe();
@@ -415,10 +411,10 @@ export function UnifiedDashboard() {
       console.warn('[Realtime Supabase] Subscripción fallback:', realtimeErr);
     }
 
-    // 3. Heartbeat Polling Inteligente (cada 4 segundos si la ventana está visible)
+    // 3. Heartbeat Polling Inteligente (cada 4 segundos si la ventana está visible: SOLO clientes/pases)
     const intervalId = setInterval(() => {
       if (typeof document !== 'undefined' && document.visibilityState === 'visible') {
-        fetchRemoteData(true);
+        fetchRemoteData(true, false);
       }
     }, 4000);
 
@@ -430,7 +426,7 @@ export function UnifiedDashboard() {
         if (event.data?.type === 'CUSTOMER_REGISTERED') {
           soundEngine.playScanSuccess();
           toast.success(`🎉 ¡Nuevo cliente registrado: ${event.data.customer?.full_name}!`);
-          fetchRemoteData(true);
+          fetchRemoteData(true, false);
         }
       };
     } catch (e) {
@@ -775,6 +771,7 @@ export function UnifiedDashboard() {
             description: 'Las tarjetas de fidelización en los teléfonos de tus clientes se actualizarán automáticamente.',
           }
         );
+        fetchRemoteData(true, true);
       } else {
         soundEngine.playScanSuccess();
         toast.success('Diseño guardado localmente en tu navegador.', { id: toastId });
