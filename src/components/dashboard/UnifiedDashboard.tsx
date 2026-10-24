@@ -38,7 +38,13 @@ import {
   Square,
   SlidersHorizontal,
   Award,
-  RefreshCw
+  RefreshCw,
+  BellRing,
+  Search,
+  Smartphone,
+  Zap,
+  CheckCheck,
+  History
 } from 'lucide-react';
 import { Badge } from '@/components/ui/Badge';
 import { Button } from '@/components/ui/Button';
@@ -69,8 +75,8 @@ import confetti from 'canvas-confetti';
 import { toast } from 'sonner';
 import { supabase } from '@/lib/supabase/client';
 
-// 4 PESTAÑAS CANÓNICAS LIMPIAS DEL DSB
-type DashboardTab = 'overview' | 'customers' | 'bookings' | 'settings';
+// PESTAÑAS CANÓNICAS DEL DSB (INCLUYE NOTIFICACIONES PUSH A WALLETS)
+type DashboardTab = 'overview' | 'customers' | 'notifications' | 'bookings' | 'settings';
 
 // SUB-NAVBAR INTERNA EN LA ZONA DE CONFIGURACIONES
 type SettingsSubTab = 'cards' | 'tiers_customers' | 'staff_pins' | 'security';
@@ -131,6 +137,76 @@ export function UnifiedDashboard() {
     '☕ 2x1 en Bebidas de Especialidad esta semana'
   );
   const [customPushMessage, setCustomPushMessage] = useState('');
+
+  // SECCIÓN PRINCIPAL: NOTIFICACIONES PUSH A WALLETS (2x1 DIRECTO POR CLIENTE)
+  const [pushTargetMode, setPushTargetMode] = useState<'individual' | 'segment'>('individual');
+  const [selectedPushCustomerId, setSelectedPushCustomerId] = useState<string | null>(null);
+  const [pushSelectedSegment, setPushSelectedSegment] = useState<'all' | 'champion' | 'loyal' | 'at_risk'>('all');
+  const [pushTitle, setPushTitle] = useState('☕ ¡2x1 en Bebidas de Especialidad!');
+  const [pushMessage, setPushMessage] = useState('¡Presenta tu pase digital en barra y disfruta 2x1 en toda nuestra carta de cafés y bebidas frías! Válido hoy.');
+  const [pushCustomerSearch, setPushCustomerSearch] = useState('');
+  const [isSendingPushNotification, setIsSendingPushNotification] = useState(false);
+  const [pushHistoryLog, setPushHistoryLog] = useState<Array<{
+    id: string;
+    targetName: string;
+    title: string;
+    body: string;
+    time: string;
+    status: 'delivered' | 'pending';
+    passType: string;
+  }>>([
+    {
+      id: 'push-sample-1',
+      targetName: 'Todos los Comensales (Campaña General)',
+      title: '☕ ¡2x1 en Café Canelo Hoy!',
+      body: '¡Presenta tu tarjeta digital en barra y lleva 2 bebidas por el precio de 1! Válido hoy.',
+      time: 'Hoy a las 09:30 AM',
+      status: 'delivered',
+      passType: 'Google Wallet & Apple Wallet'
+    },
+    {
+      id: 'push-sample-2',
+      targetName: 'Clientes VIP Champions',
+      title: '⭐ ¡Doble Sello de Bonificación!',
+      body: 'Por ser cliente VIP, hoy cada consumo te suma el doble de sellos hacia tu regalo.',
+      time: 'Ayer a las 04:15 PM',
+      status: 'delivered',
+      passType: 'Google Wallet & Apple Wallet'
+    }
+  ]);
+
+  const PUSH_TEMPLATES = [
+    {
+      id: '2x1-cafe',
+      label: '☕ 2x1 Café de Especialidad',
+      title: '☕ ¡2x1 en Bebidas de Especialidad!',
+      message: '¡Presenta tu pase digital en barra y disfruta 2x1 en toda nuestra carta de cafés y bebidas frías! Válido hoy.',
+    },
+    {
+      id: '2x1-croissant',
+      label: '🥐 2x1 en Repostería',
+      title: '🥐 ¡2x1 en Repostería Francesa!',
+      message: '¡Hoy 2x1 en croissants de mantequilla y repostería artesanal horneada en casa! Muestra este pase en caja.',
+    },
+    {
+      id: 'double-stamps',
+      label: '⭐ Doble Sello Hoy',
+      title: '⭐ ¡Doble Sello en tu Visita!',
+      message: '¡Hoy cada consumo en Café Canelo te otorga 2 sellos en lugar de 1! Avanza más rápido hacia tu recompensa.',
+    },
+    {
+      id: 'free-reward',
+      label: '🎁 Cortesía en Barra',
+      title: '🎁 ¡Tienes una Cortesía Reservada!',
+      message: '¡Te tenemos una degustación especial o shot de espresso reservado a tu nombre en barra! Válido hoy.',
+    },
+    {
+      id: 'custom',
+      label: '✍️ Personalizado',
+      title: '✨ ¡Sorpresa Especial en Café Canelo!',
+      message: 'Tenemos algo preparado especialmente para ti. Presenta tu tarjeta de cliente frecuente en barra.',
+    },
+  ];
 
   // Umbrales de Rangos (Tiers)
   const [tierConfig, setTierConfig] = useState<TierConfig>(
@@ -558,6 +634,98 @@ export function UnifiedDashboard() {
     setCustomPushMessage('');
   };
 
+  // 3.1 ENVIAR NOTIFICACIÓN PUSH A CLIENTE INDIVIDUAL (2x1) O CAMPAÑA MASIVA A WALLETS
+  const handleSendPushToCustomerOrSegment = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!pushTitle.trim() || !pushMessage.trim()) {
+      toast.error('Ingresa el título y el mensaje de la notificación');
+      return;
+    }
+
+    if (pushTargetMode === 'individual' && !selectedPushCustomerId) {
+      toast.error('Selecciona un cliente de la lista para enviarle la notificación');
+      return;
+    }
+
+    const targetCustomer = pushTargetMode === 'individual'
+      ? deduplicatedCustomers.find((c) => c.id === selectedPushCustomerId)
+      : null;
+    const targetPass = targetCustomer
+      ? passes.find((p) => p.customer_id === targetCustomer.id)
+      : null;
+
+    setIsSendingPushNotification(true);
+    const toastId = toast.loading(
+      pushTargetMode === 'individual'
+        ? `Enviando notificación push a la Wallet de ${targetCustomer?.full_name || 'cliente'}...`
+        : `Disparando campaña push masiva a Wallets...`
+    );
+
+    try {
+      const payload: any = {
+        title: pushTitle.trim(),
+        body: pushMessage.trim(),
+      };
+
+      if (pushTargetMode === 'individual') {
+        payload.customerId = targetCustomer?.id;
+        payload.targetCustomerName = targetCustomer?.full_name;
+        if (targetPass?.pass_serial_number) {
+          payload.serialNumber = targetPass.pass_serial_number;
+        }
+      } else {
+        payload.segment = pushSelectedSegment;
+      }
+
+      const res = await fetch('/api/v1/notifications/push', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+
+      const data = await res.json();
+
+      if (!res.ok) {
+        throw new Error(data.error || 'Error al emitir la notificación push');
+      }
+
+      soundEngine.playRedeemCelebration();
+      confetti({ particleCount: 70, spread: 65 });
+
+      toast.success(
+        pushTargetMode === 'individual'
+          ? `¡Notificación enviada a la Wallet de ${targetCustomer?.full_name}!`
+          : `¡Campaña push enviada a ${data.recipientsCount || 'todos los'} clientes!`,
+        {
+          id: toastId,
+          description: `Impacto directo en pantalla de bloqueo (${data.googleWalletDelivered ?? 1} pases actualizados).`,
+        }
+      );
+
+      // Registrar en el historial de la pantalla
+      const newEntry = {
+        id: `push-${Date.now()}`,
+        targetName: pushTargetMode === 'individual' 
+          ? (targetCustomer?.full_name || 'Cliente')
+          : `Segmento: ${pushSelectedSegment === 'all' ? 'Todos los Clientes' : pushSelectedSegment}`,
+        title: pushTitle.trim(),
+        body: pushMessage.trim(),
+        time: 'Hace un momento',
+        status: 'delivered' as const,
+        passType: targetPass?.pass_type === 'apple' ? 'Apple Wallet' : 'Google Wallet',
+      };
+      setPushHistoryLog((prev) => [newEntry, ...prev]);
+
+    } catch (err: unknown) {
+      soundEngine.playFraudAlert();
+      toast.error(err instanceof Error ? err.message : 'Error al enviar notificación push', {
+        id: toastId,
+      });
+    } finally {
+      setIsSendingPushNotification(false);
+    }
+  };
+
   // 4. GUARDAR LAS 3 OPCIONES PRECONFIGURADAS DE RECOMPENSAS
   const handleSavePromoOptions = () => {
     try {
@@ -810,6 +978,17 @@ export function UnifiedDashboard() {
     });
   }, [customers, tierFilter, passes, tierConfig]);
 
+  // Filtrado de clientes para la sección de Notificaciones Push
+  const searchedPushCustomers = useMemo(() => {
+    if (!pushCustomerSearch.trim()) return deduplicatedCustomers;
+    const q = pushCustomerSearch.toLowerCase().trim();
+    return deduplicatedCustomers.filter(
+      (c) =>
+        c.full_name.toLowerCase().includes(q) ||
+        (c.phone && c.phone.includes(q))
+    );
+  }, [deduplicatedCustomers, pushCustomerSearch]);
+
   return (
     <div className="min-h-screen bg-background flex flex-col md:flex-row text-left">
       {/* ============================================================== */}
@@ -895,7 +1074,25 @@ export function UnifiedDashboard() {
               <span>Clientes & Fidelidad</span>
             </button>
 
-            {/* 3. Agenda de Reservas & Calendario */}
+            {/* 3. Notificaciones Push a Wallets (2x1, Doble Sello, Cortesías) */}
+            <button
+              onClick={() => setActiveTab('notifications')}
+              className={`w-full flex items-center justify-between px-3 py-2 rounded-md transition-colors ${
+                activeTab === 'notifications'
+                  ? 'bg-brand-500/20 text-white font-bold border border-brand-400/30 shadow-sm'
+                  : 'text-zinc-400 hover:bg-white/5 hover:text-white'
+              }`}
+            >
+              <div className="flex items-center gap-2.5">
+                <BellRing className="w-4 h-4 text-purple-400" />
+                <span>Notificaciones Push</span>
+              </div>
+              <span className="text-[9px] font-bold px-1.5 py-0.5 rounded bg-purple-500/20 text-purple-300 border border-purple-500/30">
+                2x1
+              </span>
+            </button>
+
+            {/* 4. Agenda de Reservas & Calendario */}
             <button
               onClick={() => setActiveTab('bookings')}
               className={`w-full flex items-center gap-2.5 px-3 py-2 rounded-md transition-colors ${
@@ -1787,7 +1984,482 @@ export function UnifiedDashboard() {
         )}
 
         {/* ============================================================== */}
-        {/* TAB 3: AGENDA DE RESERVAS (CALENDARIO INTERACTIVO DÍA POR DÍA) */}
+        {/* TAB 3: CENTRO DE NOTIFICACIONES PUSH A WALLETS (2x1 DIRECTO)   */}
+        {/* ============================================================== */}
+        {activeTab === 'notifications' && (
+          <div className="space-y-6">
+            {/* Header de la Sección */}
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 border-b border-white/[0.08] pb-4">
+              <div className="flex items-center gap-3">
+                <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-purple-500/20 to-purple-900/40 border border-purple-500/30 flex items-center justify-center shadow-glow-purple">
+                  <BellRing className="w-5 h-5 text-purple-400" />
+                </div>
+                <div>
+                  <div className="flex items-center gap-2">
+                    <h2 className="text-xl sm:text-2xl font-bold text-white tracking-tight">
+                      Notificaciones Push a Wallets
+                    </h2>
+                    <span className="text-[10px] font-mono font-bold px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 border border-emerald-500/30">
+                      En Vivo
+                    </span>
+                  </div>
+                  <p className="text-xs text-zinc-400 mt-0.5">
+                    Envía promociones 2x1, doble sello o cortesías directas a la pantalla de bloqueo de Apple & Google Wallet.
+                  </p>
+                </div>
+              </div>
+
+              {/* Conmutador de Modo: Individual vs Segmentado */}
+              <div className="flex items-center bg-surface-100 p-1 rounded-lg border border-white/5 text-xs font-mono self-start sm:self-auto">
+                <button
+                  type="button"
+                  onClick={() => setPushTargetMode('individual')}
+                  className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md transition-all ${
+                    pushTargetMode === 'individual'
+                      ? 'bg-purple-600 text-white font-bold shadow-sm'
+                      : 'text-zinc-400 hover:text-white'
+                  }`}
+                >
+                  <Smartphone className="w-3.5 h-3.5" />
+                  <span>A un Cliente (2x1)</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setPushTargetMode('segment')}
+                  className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md transition-all ${
+                    pushTargetMode === 'segment'
+                      ? 'bg-purple-600 text-white font-bold shadow-sm'
+                      : 'text-zinc-400 hover:text-white'
+                  }`}
+                >
+                  <Users className="w-3.5 h-3.5" />
+                  <span>Campaña Masiva</span>
+                </button>
+              </div>
+            </div>
+
+            {/* Layout Principal de Notificaciones */}
+            <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
+              {/* PANEL IZQUIERDO: SELECCIÓN DE DESTINATARIO */}
+              <div className="lg:col-span-5 space-y-4">
+                {pushTargetMode === 'individual' ? (
+                  <Card className="border border-white/10 bg-surface-200/90 shadow-xl">
+                    <CardHeader className="pb-3 border-b border-white/5">
+                      <div className="flex items-center justify-between">
+                        <CardTitle className="text-sm font-bold text-white flex items-center gap-2">
+                          <Users className="w-4 h-4 text-purple-400" />
+                          Seleccionar Comensal Destinatario
+                        </CardTitle>
+                        <Badge variant="tactical" className="text-[10px]">
+                          {searchedPushCustomers.length} de {deduplicatedCustomers.length}
+                        </Badge>
+                      </div>
+                      <CardDescription className="text-xs text-zinc-400">
+                        Elige el comensal para proyectar la oferta 2x1 en su pantalla de bloqueo.
+                      </CardDescription>
+
+                      {/* Buscador Rápido de Clientes */}
+                      <div className="relative mt-2">
+                        <Search className="w-3.5 h-3.5 text-zinc-400 absolute left-2.5 top-1/2 -translate-y-1/2" />
+                        <input
+                          type="text"
+                          value={pushCustomerSearch}
+                          onChange={(e) => setPushCustomerSearch(e.target.value)}
+                          placeholder="Buscar por nombre o teléfono (+57)..."
+                          className="w-full bg-surface-100 border border-white/10 rounded-md pl-8 pr-3 py-1.5 text-xs text-white placeholder-zinc-500 font-mono focus:outline-none focus:border-purple-500"
+                        />
+                        {pushCustomerSearch && (
+                          <button
+                            type="button"
+                            onClick={() => setPushCustomerSearch('')}
+                            className="absolute right-2.5 top-1/2 -translate-y-1/2 text-zinc-400 hover:text-white text-xs"
+                          >
+                            ×
+                          </button>
+                        )}
+                      </div>
+                    </CardHeader>
+
+                    <CardContent className="p-3">
+                      {searchedPushCustomers.length === 0 ? (
+                        <div className="py-8 text-center text-zinc-500 text-xs">
+                          No se encontraron clientes registrados con ese criterio.
+                        </div>
+                      ) : (
+                        <div className="max-h-[460px] overflow-y-auto space-y-2 pr-1 custom-scrollbar">
+                          {searchedPushCustomers.map((cust) => {
+                            const pass = passes.find((p) => p.customer_id === cust.id);
+                            const rewardsRedeemed = pass?.total_rewards_redeemed || 0;
+                            const tier = cust.loyalty_tier || calculateCustomerTier(rewardsRedeemed, tierConfig);
+                            const tierMeta = getTierMeta(tier);
+                            const isSelected = (selectedPushCustomerId === cust.id) || (!selectedPushCustomerId && cust.id === deduplicatedCustomers[0]?.id);
+
+                            return (
+                              <div
+                                key={cust.id}
+                                onClick={() => setSelectedPushCustomerId(cust.id)}
+                                className={`p-3 rounded-lg border cursor-pointer transition-all ${
+                                  isSelected
+                                    ? 'bg-purple-600/20 border-purple-500 shadow-md ring-1 ring-purple-500/40'
+                                    : 'bg-surface-100 border-white/5 hover:border-white/15 hover:bg-white/[0.03]'
+                                }`}
+                              >
+                                <div className="flex items-center justify-between gap-2">
+                                  <div className="flex items-center gap-2.5 min-w-0">
+                                    <div
+                                      className="w-8 h-8 rounded-full flex items-center justify-center font-bold text-xs shrink-0"
+                                      style={{ backgroundColor: `${tierMeta.hex}25`, color: tierMeta.hex }}
+                                    >
+                                      {cust.full_name.charAt(0).toUpperCase()}
+                                    </div>
+                                    <div className="min-w-0">
+                                      <p className="text-xs font-bold text-white truncate">
+                                        {cust.full_name}
+                                      </p>
+                                      <p className="text-[10px] text-zinc-400 font-mono truncate">
+                                        {cust.phone}
+                                      </p>
+                                    </div>
+                                  </div>
+
+                                  <div className="flex flex-col items-end gap-1 shrink-0">
+                                    <span
+                                      className="text-[9px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded border"
+                                      style={{
+                                        borderColor: `${tierMeta.hex}40`,
+                                        color: tierMeta.hex,
+                                        backgroundColor: `${tierMeta.hex}15`,
+                                      }}
+                                    >
+                                      {tierMeta.label}
+                                    </span>
+                                    <div className="flex items-center gap-1 text-[9px] text-zinc-400 font-mono">
+                                      <span className="w-1.5 h-1.5 rounded-full bg-emerald-400"></span>
+                                      <span>{pass ? `${pass.current_stamps}/${store.merchant.stamps_needed} sellos` : 'Pase activo'}</span>
+                                    </div>
+                                  </div>
+                                </div>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      )}
+                    </CardContent>
+                  </Card>
+                ) : (
+                  /* Modo Segmento / Campaña Masiva */
+                  <Card className="border border-white/10 bg-surface-200/90 shadow-xl">
+                    <CardHeader className="pb-3 border-b border-white/5">
+                      <CardTitle className="text-sm font-bold text-white flex items-center gap-2">
+                        <Users className="w-4 h-4 text-purple-400" />
+                        Seleccionar Segmento de Clientes
+                      </CardTitle>
+                      <CardDescription className="text-xs text-zinc-400">
+                        Dispara la notificación de forma masiva a todos los pases del grupo.
+                      </CardDescription>
+                    </CardHeader>
+                    <CardContent className="p-3 space-y-2">
+                      {[
+                        {
+                          id: 'all',
+                          title: 'Todos los Comensales',
+                          desc: 'Impacta al 100% de los clientes registrados con tarjeta digital.',
+                          count: deduplicatedCustomers.length,
+                          color: 'text-purple-400',
+                          border: 'border-purple-500/30',
+                        },
+                        {
+                          id: 'champion',
+                          title: 'Champions VIP',
+                          desc: 'Clientes más fieles con mayor frecuencia y bonos redimidos.',
+                          count: champions.length,
+                          color: 'text-champagne-light',
+                          border: 'border-amber-500/30',
+                        },
+                        {
+                          id: 'loyal',
+                          title: 'Clientes Frecuentes',
+                          desc: 'Comensales con visitas recurrentes en el último mes.',
+                          count: loyal.length,
+                          color: 'text-blue-400',
+                          border: 'border-blue-500/30',
+                        },
+                        {
+                          id: 'at_risk',
+                          title: 'En Riesgo de Inactividad',
+                          desc: 'Clientes que no nos visitan hace más de 3 semanas.',
+                          count: atRisk.length,
+                          color: 'text-rose-400',
+                          border: 'border-rose-500/30',
+                        },
+                      ].map((seg) => (
+                        <div
+                          key={seg.id}
+                          onClick={() => setPushSelectedSegment(seg.id as any)}
+                          className={`p-3 rounded-lg border cursor-pointer transition-all ${
+                            pushSelectedSegment === seg.id
+                              ? 'bg-purple-600/20 border-purple-500 shadow-sm ring-1 ring-purple-500/40'
+                              : 'bg-surface-100 border-white/5 hover:border-white/15'
+                          }`}
+                        >
+                          <div className="flex items-center justify-between">
+                            <span className={`text-xs font-bold ${seg.color}`}>
+                              {seg.title}
+                            </span>
+                            <span className="text-[10px] font-mono font-bold px-2 py-0.5 rounded bg-black/40 border border-white/10 text-zinc-300">
+                              {seg.count} clientes
+                            </span>
+                          </div>
+                          <p className="text-[11px] text-zinc-400 mt-1">
+                            {seg.desc}
+                          </p>
+                        </div>
+                      ))}
+                    </CardContent>
+                  </Card>
+                )}
+              </div>
+
+              {/* PANEL DERECHO: COMPOSITOR DE LA OFERTA & LIVE LOCKSCREEN PREVIEW */}
+              <div className="lg:col-span-7 space-y-4">
+                <Card className="border border-white/10 bg-surface-200/90 shadow-xl">
+                  <CardHeader className="pb-3 border-b border-white/5">
+                    <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                      <div>
+                        <CardTitle className="text-sm font-bold text-white flex items-center gap-2">
+                          <Zap className="w-4 h-4 text-purple-400" />
+                          Compositor de Oferta Push
+                        </CardTitle>
+                        <CardDescription className="text-xs text-zinc-400">
+                          Redacta o elige una plantilla de 1 clic para enviar a la Wallet.
+                        </CardDescription>
+                      </div>
+
+                      {/* Badge Destinatario Actual */}
+                      <div className="bg-surface-100 px-2.5 py-1 rounded border border-white/10 text-[11px] font-mono text-zinc-300">
+                        Destinatario:{' '}
+                        <span className="text-purple-300 font-bold">
+                          {pushTargetMode === 'individual'
+                            ? (deduplicatedCustomers.find((c) => c.id === (selectedPushCustomerId || deduplicatedCustomers[0]?.id))?.full_name || 'Selecciona un cliente')
+                            : `Segmento (${pushSelectedSegment === 'all' ? 'Todos' : pushSelectedSegment})`}
+                        </span>
+                      </div>
+                    </div>
+                  </CardHeader>
+
+                  <CardContent className="p-4 space-y-4">
+                    {/* Plantillas Rápidas de 1 Clic */}
+                    <div>
+                      <label className="text-[11px] font-mono uppercase text-zinc-400 block mb-2 font-bold">
+                        Plantillas Rápidas de 1 Clic (Promociones 2x1 y Cortesías):
+                      </label>
+                      <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
+                        {PUSH_TEMPLATES.map((tmpl) => (
+                          <button
+                            key={tmpl.id}
+                            type="button"
+                            onClick={() => {
+                              setPushTitle(tmpl.title);
+                              setPushMessage(tmpl.message);
+                              soundEngine.playScanSuccess();
+                            }}
+                            className="p-2 rounded-lg bg-surface-100 border border-white/10 hover:border-purple-500/50 hover:bg-purple-600/10 text-left transition-all group"
+                          >
+                            <span className="text-xs font-bold text-zinc-200 group-hover:text-purple-300 block truncate">
+                              {tmpl.label}
+                            </span>
+                            <span className="text-[10px] text-zinc-400 block truncate mt-0.5">
+                              {tmpl.title}
+                            </span>
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+
+                    {/* Formulario de Redacción */}
+                    <form onSubmit={handleSendPushToCustomerOrSegment} className="space-y-3 font-mono text-xs">
+                      <div>
+                        <div className="flex items-center justify-between mb-1">
+                          <label className="text-zinc-300 font-bold">Título de la Notificación:</label>
+                          <span className="text-[10px] text-zinc-500">{pushTitle.length}/60 chars</span>
+                        </div>
+                        <input
+                          type="text"
+                          required
+                          maxLength={60}
+                          value={pushTitle}
+                          onChange={(e) => setPushTitle(e.target.value)}
+                          placeholder="Ej: ☕ ¡2x1 en Bebidas de Especialidad Hoy!"
+                          className="w-full bg-surface-100 border border-white/10 rounded-md px-3 py-2 text-white font-sans text-xs focus:outline-none focus:border-purple-500"
+                        />
+                      </div>
+
+                      <div>
+                        <div className="flex items-center justify-between mb-1">
+                          <label className="text-zinc-300 font-bold">Mensaje / Contenido en Pantalla:</label>
+                          <span className="text-[10px] text-zinc-500">{pushMessage.length}/160 chars</span>
+                        </div>
+                        <textarea
+                          rows={3}
+                          required
+                          maxLength={160}
+                          value={pushMessage}
+                          onChange={(e) => setPushMessage(e.target.value)}
+                          placeholder="Ej: ¡Presenta este pase digital en barra y lleva 2 cafés por el precio de 1! Válido durante el día de hoy."
+                          className="w-full bg-surface-100 border border-white/10 rounded-md px-3 py-2 text-white font-sans text-xs focus:outline-none focus:border-purple-500"
+                        />
+                      </div>
+
+                      {/* LIVE PHONE LOCKSCREEN PREVIEW */}
+                      <div className="pt-2">
+                        <label className="text-[10px] font-mono uppercase text-zinc-400 block mb-2 font-bold flex items-center justify-between">
+                          <span>Previsualización en Pantalla de Bloqueo del Teléfono:</span>
+                          <span className="text-emerald-400 text-[10px] flex items-center gap-1">
+                            <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse"></span>
+                            Google Wallet & Apple Wallet
+                          </span>
+                        </label>
+
+                        {/* Marco de Pantalla de Bloqueo Estilizado */}
+                        <div className="bg-black/90 rounded-2xl border border-white/15 p-4 shadow-2xl relative overflow-hidden">
+                          {/* Barra de Estado del Smartphone */}
+                          <div className="flex items-center justify-between text-[10px] font-mono text-zinc-500 pb-2 border-b border-white/5">
+                            <span>10:42 AM</span>
+                            <div className="flex items-center gap-1.5">
+                              <span>5G</span>
+                              <span>100%</span>
+                            </div>
+                          </div>
+
+                          {/* Notificación Emergente Estilo Google Wallet Nativa */}
+                          <div className="mt-3 bg-zinc-900/90 rounded-xl border border-white/10 p-3 shadow-lg transition-all">
+                            <div className="flex items-center justify-between mb-1.5">
+                              <div className="flex items-center gap-2">
+                                <div className="w-5 h-5 rounded-md bg-white flex items-center justify-center p-0.5 shadow-sm">
+                                  {/* Icono Google Wallet estilizado */}
+                                  <svg viewBox="0 0 24 24" className="w-3.5 h-3.5" fill="none">
+                                    <path d="M21 18v1a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2v1" stroke="#4285F4" strokeWidth="2" strokeLinecap="round"/>
+                                    <rect x="15" y="10" width="7" height="6" rx="2" stroke="#34A853" strokeWidth="2"/>
+                                    <circle cx="18.5" cy="13" r="1" fill="#EA4335"/>
+                                  </svg>
+                                </div>
+                                <span className="text-[11px] font-bold text-zinc-300 font-sans">
+                                  Google Wallet · Café Canelo
+                                </span>
+                              </div>
+                              <span className="text-[9px] text-zinc-500 font-mono">Ahora</span>
+                            </div>
+
+                            <p className="text-xs font-bold text-white font-sans">
+                              {pushTitle || 'Título de la notificación...'}
+                            </p>
+                            <p className="text-[11px] text-zinc-300 font-sans mt-0.5 leading-relaxed">
+                              {pushMessage || 'Cuerpo del mensaje promocional 2x1...'}
+                            </p>
+
+                            <div className="mt-2 pt-2 border-t border-white/5 flex items-center justify-between text-[9px] text-zinc-500 font-mono">
+                              <span>Toca para ver tu pase digital</span>
+                              <span className="text-purple-400 font-bold">TEXT_AND_NOTIFY</span>
+                            </div>
+                          </div>
+                        </div>
+                      </div>
+
+                      {/* Botón de Envío Primario */}
+                      <div className="pt-2">
+                        <Button
+                          type="submit"
+                          variant="champagne"
+                          size="lg"
+                          disabled={isSendingPushNotification}
+                          className="w-full font-bold shadow-glow-purple text-xs sm:text-sm py-3"
+                        >
+                          {isSendingPushNotification ? (
+                            <span className="flex items-center justify-center gap-2">
+                              <RefreshCw className="w-4 h-4 animate-spin" />
+                              Transmitiendo notificación a la Wallet...
+                            </span>
+                          ) : (
+                            <span className="flex items-center justify-center gap-2">
+                              <Send className="w-4 h-4" />
+                              {pushTargetMode === 'individual'
+                                ? `Disparar Notificación Push a la Wallet de ${
+                                    deduplicatedCustomers.find(
+                                      (c) => c.id === (selectedPushCustomerId || deduplicatedCustomers[0]?.id)
+                                    )?.full_name || 'Comensal'
+                                  }`
+                                : `Disparar Campaña Masiva a Wallets`}
+                            </span>
+                          )}
+                        </Button>
+                      </div>
+                    </form>
+                  </CardContent>
+                </Card>
+              </div>
+            </div>
+
+            {/* HISTORIAL DE NOTIFICACIONES RECIENTES ENVIADAS */}
+            <Card className="border border-white/10 bg-surface-200/90 shadow-xl">
+              <CardHeader className="pb-3 border-b border-white/5">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-2">
+                    <History className="w-4 h-4 text-purple-400" />
+                    <CardTitle className="text-sm font-bold text-white">
+                      Bitácora de Notificaciones Emitidas
+                    </CardTitle>
+                  </div>
+                  <Badge variant="tactical" className="text-[10px]">
+                    {pushHistoryLog.length} registros
+                  </Badge>
+                </div>
+                <CardDescription className="text-xs text-zinc-400">
+                  Historial de promociones 2x1 y mensajes disparados a tarjetas de clientes.
+                </CardDescription>
+              </CardHeader>
+              <CardContent className="p-0 overflow-x-auto">
+                <table className="w-full text-left text-xs font-mono min-w-[650px]">
+                  <thead className="bg-surface-100 border-b border-white/5 text-zinc-400 uppercase text-[10px]">
+                    <tr>
+                      <th className="py-2.5 px-4">Fecha / Hora</th>
+                      <th className="py-2.5 px-4">Destinatario</th>
+                      <th className="py-2.5 px-4">Título Promocional</th>
+                      <th className="py-2.5 px-4">Mensaje Enviado</th>
+                      <th className="py-2.5 px-4 text-right">Estado</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-white/5">
+                    {pushHistoryLog.map((log) => (
+                      <tr key={log.id} className="hover:bg-white/[0.02]">
+                        <td className="py-3 px-4 text-zinc-400 whitespace-nowrap">
+                          {log.time}
+                        </td>
+                        <td className="py-3 px-4 font-bold text-white whitespace-nowrap">
+                          {log.targetName}
+                        </td>
+                        <td className="py-3 px-4 text-purple-300 font-sans font-semibold">
+                          {log.title}
+                        </td>
+                        <td className="py-3 px-4 text-zinc-300 font-sans max-w-xs truncate">
+                          {log.body}
+                        </td>
+                        <td className="py-3 px-4 text-right whitespace-nowrap">
+                          <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-emerald-500/20 text-emerald-300 text-[10px] font-bold border border-emerald-500/30">
+                            <CheckCheck className="w-3 h-3" />
+                            Entregado a Wallet
+                          </span>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </CardContent>
+            </Card>
+          </div>
+        )}
+
+        {/* ============================================================== */}
+        {/* TAB 4: AGENDA DE RESERVAS (CALENDARIO INTERACTIVO DÍA POR DÍA) */}
         {/* ============================================================== */}
         {activeTab === 'bookings' && (
           <div className="space-y-6">
