@@ -26,6 +26,8 @@ import { soundEngine } from '@/lib/audio/sound-effects';
 import { formatCurrency } from '@/lib/utils';
 import confetti from 'canvas-confetti';
 import { toast } from 'sonner';
+import { supabase } from '@/lib/supabase/client';
+import { Customer } from '@/types/domain';
 
 export default function AdminDashboardPage() {
   const store = getStore();
@@ -37,6 +39,38 @@ export default function AdminDashboardPage() {
   const [reservations, setReservations] = useState(store.reservations);
 
   useEffect(() => {
+    const fetchRemote = async () => {
+      try {
+        const res = await fetch('/api/v1/customers');
+        if (res.ok) {
+          const data = await res.json();
+          if (data.customers) {
+            store.syncFromRemote({ customers: data.customers, passes: data.passes });
+          }
+        }
+      } catch (e) {}
+    };
+
+    fetchRemote();
+
+    // Supabase Realtime Listener
+    let channel: any = null;
+    try {
+      channel = supabase
+        .channel('admin-dashboard-crm-realtime')
+        .on('postgres_changes', { event: '*', schema: 'public', table: 'customers' }, fetchRemote)
+        .on('postgres_changes', { event: '*', schema: 'public', table: 'wallet_passes' }, fetchRemote)
+        .on('postgres_changes', { event: '*', schema: 'public', table: 'transactions' }, fetchRemote)
+        .subscribe();
+    } catch (e) {}
+
+    // Polling inteligente cada 4s
+    const interval = setInterval(() => {
+      if (typeof document !== 'undefined' && document.visibilityState === 'visible') {
+        fetchRemote();
+      }
+    }, 4000);
+
     const update = () => {
       setCustomers([...store.customers]);
       setPasses([...store.passes]);
@@ -44,14 +78,37 @@ export default function AdminDashboardPage() {
       setFraudAlerts([...store.fraudAlerts]);
       setReservations([...store.reservations]);
     };
-    return store.subscribe(update);
+    const unsub = store.subscribe(update);
+
+    return () => {
+      if (channel) supabase.removeChannel(channel);
+      clearInterval(interval);
+      unsub();
+    };
   }, [store]);
 
+  // Deduplicación blindada
+  const deduplicatedCustomers = React.useMemo(() => {
+    const cleanDigits = (p: string) => (p || '').replace(/\D/g, '').slice(-10);
+    const seen = new Set<string>();
+    const result: Customer[] = [];
+
+    for (const c of customers) {
+      const phoneDigits = cleanDigits(c.phone);
+      const key = phoneDigits.length >= 7 ? phoneDigits : c.id;
+      if (!seen.has(key)) {
+        seen.add(key);
+        result.push(c);
+      }
+    }
+    return result;
+  }, [customers]);
+
   // Segmentación RFM
-  const champions = customers.filter((c) => c.rfm_segment === 'champion');
-  const loyal = customers.filter((c) => c.rfm_segment === 'loyal');
-  const atRisk = customers.filter((c) => c.rfm_segment === 'at_risk');
-  const hibernating = customers.filter((c) => c.rfm_segment === 'hibernating');
+  const champions = deduplicatedCustomers.filter((c) => c.rfm_segment === 'champion');
+  const loyal = deduplicatedCustomers.filter((c) => c.rfm_segment === 'loyal');
+  const atRisk = deduplicatedCustomers.filter((c) => c.rfm_segment === 'at_risk');
+  const hibernating = deduplicatedCustomers.filter((c) => c.rfm_segment === 'hibernating');
 
   // Disparar Push a Clientes En Riesgo
   const handleTriggerAtRiskCampaign = () => {
@@ -136,7 +193,7 @@ export default function AdminDashboardPage() {
               <Users className="w-4 h-4 text-purple-400" />
             </div>
             <CardTitle className="text-2xl font-bold font-mono text-white mt-1">
-              {customers.length}
+              {deduplicatedCustomers.length}
             </CardTitle>
           </CardHeader>
           <CardContent className="text-[11px] text-zinc-500 font-mono">

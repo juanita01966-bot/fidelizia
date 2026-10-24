@@ -112,13 +112,21 @@ export default function JoinPage() {
           const resJson = await response.json();
           customerData = resJson.customer;
           passData = resJson.pass;
-          // Sincronizar en el store local del cliente
-          store.registerCustomer({
-            fullName: customerData.full_name,
-            phone: customerData.phone,
-            birthdate: customerData.birthdate,
-            passType: passData.pass_type,
+
+          // Sincronizar en el store local preservando exactamente el ID y Serial de Supabase
+          store.syncFromRemote({
+            customers: [customerData],
+            passes: [passData],
           });
+
+          // Notificar en tiempo real a cualquier pestaña del Dashboard abierta en el navegador
+          try {
+            const bc = new BroadcastChannel('fidelizia_realtime_sync');
+            bc.postMessage({ type: 'CUSTOMER_REGISTERED', customer: customerData, pass: passData });
+            bc.close();
+          } catch (e) {
+            // BroadcastChannel opcional
+          }
         } else {
           // Fallback a registro local si el endpoint falla
           const local = store.registerCustomer({

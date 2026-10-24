@@ -81,25 +81,11 @@ export async function GET() {
           }
         }
 
-        // Combinar con los clientes locales que puedan no estar en Supabase para no perder nada
-        const seenIds = new Set(mappedCustomers.map((c) => c.id));
-        const seenPhones = new Set(mappedCustomers.map((c) => c.phone));
-
-        for (const localCust of fideliziaStore.customers) {
-          if (!seenIds.has(localCust.id) && !seenPhones.has(localCust.phone)) {
-            mappedCustomers.push(localCust);
-          }
-        }
-
-        const seenSerials = new Set(mappedPasses.map((p) => p.pass_serial_number));
-        for (const localPass of fideliziaStore.passes) {
-          if (!seenSerials.has(localPass.pass_serial_number)) {
-            mappedPasses.push(localPass);
-          }
-        }
-
         customersList = mappedCustomers;
         passesList = mappedPasses;
+
+        // Mantener la memoria del servidor en perfecta sincronía con Supabase
+        fideliziaStore.syncFromRemote({ customers: mappedCustomers, passes: mappedPasses });
       }
     } catch (dbErr) {
       console.warn('[Customers GET API] Supabase query error, fallback to memory:', dbErr);

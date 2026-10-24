@@ -7,6 +7,7 @@ import { Badge } from '@/components/ui/Badge';
 import { Button } from '@/components/ui/Button';
 import { getStore } from '@/lib/store/fidelizia-store';
 import { Customer } from '@/types/domain';
+import { supabase } from '@/lib/supabase/client';
 
 export default function CustomersPage() {
   const store = getStore();
@@ -15,9 +16,9 @@ export default function CustomersPage() {
   const [selectedSegment, setSelectedSegment] = useState<string>('all');
   const [isSyncing, setIsSyncing] = useState(false);
 
-  const fetchCustomers = async () => {
+  const fetchCustomers = async (silent = false) => {
     try {
-      setIsSyncing(true);
+      if (!silent) setIsSyncing(true);
       const res = await fetch('/api/v1/customers');
       if (res.ok) {
         const data = await res.json();
@@ -29,15 +30,69 @@ export default function CustomersPage() {
     } catch (e) {
       console.warn('Error fetching customers:', e);
     } finally {
-      setIsSyncing(false);
+      if (!silent) setIsSyncing(false);
     }
   };
 
   useEffect(() => {
-    fetchCustomers();
+    // 1. Carga inicial
+    fetchCustomers(true);
+
+    // 2. Supabase Realtime WebSocket
+    let channel: any = null;
+    try {
+      channel = supabase
+        .channel('admin-customers-realtime')
+        .on('postgres_changes', { event: '*', schema: 'public', table: 'customers' }, () => {
+          fetchCustomers(true);
+        })
+        .on('postgres_changes', { event: '*', schema: 'public', table: 'wallet_passes' }, () => {
+          fetchCustomers(true);
+        })
+        .subscribe();
+    } catch (e) {
+      console.warn('[Realtime error]:', e);
+    }
+
+    // 3. Heartbeat Polling cada 4 segundos
+    const interval = setInterval(() => {
+      if (typeof document !== 'undefined' && document.visibilityState === 'visible') {
+        fetchCustomers(true);
+      }
+    }, 4000);
+
+    // 4. BroadcastChannel entre pestañas
+    let bc: BroadcastChannel | null = null;
+    try {
+      bc = new BroadcastChannel('fidelizia_realtime_sync');
+      bc.onmessage = () => fetchCustomers(true);
+    } catch (e) {}
+
+    return () => {
+      if (channel) supabase.removeChannel(channel);
+      clearInterval(interval);
+      if (bc) bc.close();
+    };
   }, []);
 
-  const filteredCustomers = customers.filter((c) => {
+  // Deduplicación blindada
+  const deduplicatedCustomers = React.useMemo(() => {
+    const cleanDigits = (p: string) => (p || '').replace(/\D/g, '').slice(-10);
+    const seen = new Set<string>();
+    const result: Customer[] = [];
+
+    for (const c of customers) {
+      const phoneDigits = cleanDigits(c.phone);
+      const key = phoneDigits.length >= 7 ? phoneDigits : c.id;
+      if (!seen.has(key)) {
+        seen.add(key);
+        result.push(c);
+      }
+    }
+    return result;
+  }, [customers]);
+
+  const filteredCustomers = deduplicatedCustomers.filter((c) => {
     const matchesSearch =
       c.full_name.toLowerCase().includes(searchTerm.toLowerCase()) ||
       c.phone.includes(searchTerm);

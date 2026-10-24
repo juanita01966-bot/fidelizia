@@ -1078,33 +1078,46 @@ export class FideliziaStore {
 
   // Sincronización transparente desde Supabase hacia la memoria / localStorage
   public syncFromRemote(payload: { customers?: Customer[]; passes?: WalletPass[]; merchant?: Partial<Merchant> }) {
+    const cleanDigits = (p: string) => (p || '').replace(/\D/g, '').slice(-10);
+
     if (payload.customers && payload.customers.length > 0) {
-      const existingIds = new Set(this.customers.map((c) => c.id));
-      const existingPhones = new Set(this.customers.map((c) => c.phone));
+      const mergedMap = new Map<string, Customer>();
+
+      // 1. Incorporar primero los clientes remotos (Supabase es la fuente de verdad)
       for (const remoteCust of payload.customers) {
-        if (!existingIds.has(remoteCust.id) && !existingPhones.has(remoteCust.phone)) {
-          this.customers.unshift(remoteCust);
-        } else {
-          const idx = this.customers.findIndex((c) => c.id === remoteCust.id || c.phone === remoteCust.phone);
-          if (idx !== -1) {
-            this.customers[idx] = { ...this.customers[idx], ...remoteCust };
-          }
+        const phoneKey = cleanDigits(remoteCust.phone);
+        const mapKey = phoneKey.length >= 7 ? phoneKey : remoteCust.id;
+        mergedMap.set(mapKey, remoteCust);
+      }
+
+      // 2. Incorporar clientes locales solo si no existen en los remotos
+      for (const localCust of this.customers) {
+        const phoneKey = cleanDigits(localCust.phone);
+        const mapKey = phoneKey.length >= 7 ? phoneKey : localCust.id;
+        if (!mergedMap.has(mapKey)) {
+          mergedMap.set(mapKey, localCust);
         }
       }
+
+      this.customers = Array.from(mergedMap.values());
     }
 
     if (payload.passes && payload.passes.length > 0) {
-      const existingSerials = new Set(this.passes.map((p) => p.pass_serial_number));
+      const passesMap = new Map<string, WalletPass>();
+
+      // Pases remotos primero
       for (const remotePass of payload.passes) {
-        if (!existingSerials.has(remotePass.pass_serial_number)) {
-          this.passes.unshift(remotePass);
-        } else {
-          const idx = this.passes.findIndex((p) => p.pass_serial_number === remotePass.pass_serial_number);
-          if (idx !== -1) {
-            this.passes[idx] = { ...this.passes[idx], ...remotePass };
-          }
+        passesMap.set(remotePass.pass_serial_number, remotePass);
+      }
+
+      // Pases locales si no colisionan
+      for (const localPass of this.passes) {
+        if (!passesMap.has(localPass.pass_serial_number)) {
+          passesMap.set(localPass.pass_serial_number, localPass);
         }
       }
+
+      this.passes = Array.from(passesMap.values());
     }
 
     if (payload.merchant) {

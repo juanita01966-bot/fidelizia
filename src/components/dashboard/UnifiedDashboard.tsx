@@ -67,6 +67,7 @@ import { formatCurrency, cn } from '@/lib/utils';
 import { soundEngine } from '@/lib/audio/sound-effects';
 import confetti from 'canvas-confetti';
 import { toast } from 'sonner';
+import { supabase } from '@/lib/supabase/client';
 
 // 4 PESTAÑAS CANÓNICAS LIMPIAS DEL DSB
 type DashboardTab = 'overview' | 'customers' | 'bookings' | 'settings';
@@ -296,17 +297,105 @@ export function UnifiedDashboard() {
     }
   };
 
+  // Sincronización continua en tiempo real (Supabase Realtime + Polling Inteligente + BroadcastChannel)
   useEffect(() => {
+    // 1. Carga inicial
     fetchRemoteData(true);
+
+    // 2. Supabase Realtime WebSocket Listener (para comensales desde celulares remotos)
+    let channel: any = null;
+    try {
+      channel = supabase
+        .channel('fidelizia-realtime-dashboard')
+        .on(
+          'postgres_changes',
+          { event: '*', schema: 'public', table: 'customers' },
+          (payload: any) => {
+            fetchRemoteData(true);
+            if (payload?.eventType === 'INSERT' && payload.new) {
+              soundEngine.playScanSuccess();
+              toast.success(`🎉 ¡Nuevo cliente en tiempo real: ${payload.new.full_name || 'Comensal'}!`, {
+                description: 'Se ha sincronizado automáticamente en la tabla.',
+              });
+            }
+          }
+        )
+        .on(
+          'postgres_changes',
+          { event: '*', schema: 'public', table: 'wallet_passes' },
+          () => {
+            fetchRemoteData(true);
+          }
+        )
+        .on(
+          'postgres_changes',
+          { event: '*', schema: 'public', table: 'merchants' },
+          () => {
+            fetchRemoteData(true);
+          }
+        )
+        .subscribe();
+    } catch (realtimeErr) {
+      console.warn('[Realtime Supabase] Subscripción fallback:', realtimeErr);
+    }
+
+    // 3. Heartbeat Polling Inteligente (cada 4 segundos si la ventana está visible)
+    const intervalId = setInterval(() => {
+      if (typeof document !== 'undefined' && document.visibilityState === 'visible') {
+        fetchRemoteData(true);
+      }
+    }, 4000);
+
+    // 4. BroadcastChannel entre pestañas locales del mismo navegador (<5ms)
+    let bc: BroadcastChannel | null = null;
+    try {
+      bc = new BroadcastChannel('fidelizia_realtime_sync');
+      bc.onmessage = (event) => {
+        if (event.data?.type === 'CUSTOMER_REGISTERED') {
+          soundEngine.playScanSuccess();
+          toast.success(`🎉 ¡Nuevo cliente registrado: ${event.data.customer?.full_name}!`);
+          fetchRemoteData(true);
+        }
+      };
+    } catch (e) {
+      // BroadcastChannel opcional
+    }
+
+    return () => {
+      if (channel) {
+        supabase.removeChannel(channel);
+      }
+      clearInterval(intervalId);
+      if (bc) {
+        bc.close();
+      }
+    };
   }, []);
 
   const isAdmin = session.role === 'admin';
 
+  // Deduplicación blindada por número telefónico normalizado o ID
+  const deduplicatedCustomers = useMemo(() => {
+    const cleanDigits = (p: string) => (p || '').replace(/\D/g, '').slice(-10);
+    const seen = new Set<string>();
+    const result: Customer[] = [];
+
+    for (const c of customers) {
+      const phoneDigits = cleanDigits(c.phone);
+      const key = phoneDigits.length >= 7 ? phoneDigits : c.id;
+      if (!seen.has(key)) {
+        seen.add(key);
+        result.push(c);
+      }
+    }
+    return result;
+  }, [customers]);
+
   // Métricas financieras calculadas (Solo Admin)
   const totalRevenue = transactions.reduce((sum, tx) => sum + (tx.amount || 0), 0);
-  const champions = customers.filter((c) => c.rfm_segment === 'champion');
-  const loyal = customers.filter((c) => c.rfm_segment === 'loyal');
-  const atRisk = customers.filter((c) => c.rfm_segment === 'at_risk');
+  const champions = deduplicatedCustomers.filter((c) => c.rfm_segment === 'champion');
+  const loyal = deduplicatedCustomers.filter((c) => c.rfm_segment === 'loyal');
+  const atRisk = deduplicatedCustomers.filter((c) => c.rfm_segment === 'at_risk');
 
   // Conmutador rápido de rol
   const handleToggleRole = (newRole: UserRole) => {
@@ -710,10 +799,10 @@ export function UnifiedDashboard() {
     }
   };
 
-  // Filtrado de clientes según el rango seleccionado
+  // Filtrado de clientes según el rango seleccionado (sobre lista deduplicada)
   const filteredCustomers = useMemo(() => {
-    if (tierFilter === 'all') return customers;
-    return customers.filter((c) => {
+    if (tierFilter === 'all') return deduplicatedCustomers;
+    return deduplicatedCustomers.filter((c) => {
       const pass = passes.find((p) => p.customer_id === c.id);
       const rewardsRedeemed = pass?.total_rewards_redeemed || 0;
       const tier = c.loyalty_tier || calculateCustomerTier(rewardsRedeemed, tierConfig);
