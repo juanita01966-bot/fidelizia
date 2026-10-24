@@ -54,6 +54,16 @@ function getGoogleAuth(): GoogleAuth {
   return cachedAuth;
 }
 
+export const DEFAULT_HERO_IMAGE_URL =
+  process.env.NEXT_PUBLIC_WALLET_HERO_IMAGE ||
+  'https://tmsdbjrzaggegfxkxfqz.supabase.co/storage/v1/object/public/wallet-assets/hero_card_canelo.png';
+
+export const DEFAULT_PROGRAM_LOGO_URL =
+  process.env.NEXT_PUBLIC_LOGO_URL ||
+  'https://tmsdbjrzaggegfxkxfqz.supabase.co/storage/v1/object/public/wallet-assets/logo_canelo.png';
+
+export const DEFAULT_WALLET_HEX_BG = '#1c1007';
+
 /**
  * Asegura que la clase LoyaltyClass exista en Google Wallet antes de emitir pases.
  */
@@ -67,9 +77,9 @@ export async function ensureGoogleLoyaltyClass(): Promise<void> {
 
   const store = getStore();
   const merchant = store.merchant;
-  const hexBg = merchant.card_gradient?.from || merchant.brand_color || '#8b5cf6';
+  const hexBg = merchant.card_gradient?.from || merchant.brand_color || DEFAULT_WALLET_HEX_BG;
 
-  const heroImageUrl = 'https://images.unsplash.com/photo-1501339847302-ac426a4a7cbb?w=1032&auto=format&fit=crop&q=80';
+  const heroImageUrl = DEFAULT_HERO_IMAGE_URL;
 
   const classPayload = {
     id: CLASS_ID,
@@ -77,7 +87,7 @@ export async function ensureGoogleLoyaltyClass(): Promise<void> {
     programName: 'Club Canelo - Fidelidad',
     programLogo: {
       sourceUri: {
-        uri: process.env.NEXT_PUBLIC_LOGO_URL || 'https://images.unsplash.com/photo-1501339847302-ac426a4a7cbb?w=500&auto=format&fit=crop&q=60',
+        uri: DEFAULT_PROGRAM_LOGO_URL,
       },
       contentDescription: {
         defaultValue: { language: 'es-CO', value: `${merchant.name || 'Café Canelo'} Logo` },
@@ -88,7 +98,7 @@ export async function ensureGoogleLoyaltyClass(): Promise<void> {
         uri: heroImageUrl,
       },
       contentDescription: {
-        defaultValue: { language: 'es-CO', value: `${merchant.name || 'Café Canelo'} Banner` },
+        defaultValue: { language: 'es-CO', value: `${merchant.name || 'Café Canelo'} Tarjeta Oficial` },
       },
     },
     hexBackgroundColor: hexBg,
@@ -148,10 +158,10 @@ export async function updateGoogleLoyaltyClassDesign(options?: {
 
   const store = getStore();
   const merchant = store.merchant;
-  const hexBg = options?.hexBackgroundColor || merchant.card_gradient?.from || merchant.brand_color || '#8b5cf6';
+  const hexBg = options?.hexBackgroundColor || merchant.card_gradient?.from || merchant.brand_color || DEFAULT_WALLET_HEX_BG;
   const issuerName = options?.issuerName || merchant.name || 'Café Canelo & Specialty Roasters';
   const programName = options?.programName || 'Club Canelo - Fidelidad';
-  const heroImageUrl = options?.heroImageUrl || 'https://images.unsplash.com/photo-1501339847302-ac426a4a7cbb?w=1032&auto=format&fit=crop&q=80';
+  const heroImageUrl = options?.heroImageUrl || DEFAULT_HERO_IMAGE_URL;
 
   const patchPayload = {
     hexBackgroundColor: hexBg,
@@ -161,7 +171,7 @@ export async function updateGoogleLoyaltyClassDesign(options?: {
     heroImage: {
       sourceUri: { uri: heroImageUrl },
       contentDescription: {
-        defaultValue: { language: 'es-CO', value: `${issuerName} Banner` },
+        defaultValue: { language: 'es-CO', value: `${issuerName} Tarjeta Oficial` },
       },
     },
   };
@@ -191,7 +201,7 @@ export async function generateGoogleWalletSaveUrl(
   const store = getStore();
   const merchant = store.merchant;
   const isSingleCard = merchant.loyalty_program_mode === 'single_card';
-  const hexBg = merchant.card_gradient?.from || merchant.brand_color || '#8b5cf6';
+  const hexBg = merchant.card_gradient?.from || merchant.brand_color || DEFAULT_WALLET_HEX_BG;
 
   const objectId = `${ISSUER_ID}.${pass.pass_serial_number}`;
 
@@ -221,7 +231,7 @@ export async function generateGoogleWalletSaveUrl(
   const emptyIcons = '⚪'.repeat(Math.max(0, totalStamps - currentStamps));
   const stampsVisual = `${filledIcons}${emptyIcons}`;
 
-  const heroImageUrl = 'https://images.unsplash.com/photo-1501339847302-ac426a4a7cbb?w=1032&auto=format&fit=crop&q=80';
+  const heroImageUrl = DEFAULT_HERO_IMAGE_URL;
 
   const loyaltyObject = {
     id: objectId,
@@ -234,7 +244,7 @@ export async function generateGoogleWalletSaveUrl(
         uri: heroImageUrl,
       },
       contentDescription: {
-        defaultValue: { language: 'es-CO', value: `${merchant.name || 'Café Canelo'} Banner` },
+        defaultValue: { language: 'es-CO', value: `${merchant.name || 'Café Canelo'} Tarjeta Oficial` },
       },
     },
     loyaltyPoints: {
@@ -353,7 +363,7 @@ export async function updateGooglePassStamps(
     const objectId = `${ISSUER_ID}.${serialNumber}`;
     const url = `https://walletobjects.googleapis.com/walletobjects/v1/loyaltyObject/${objectId}?updateMask=loyaltyPoints,secondaryLoyaltyPoints,messages,heroImage`;
 
-    const heroImageUrl = 'https://images.unsplash.com/photo-1501339847302-ac426a4a7cbb?w=1032&auto=format&fit=crop&q=80';
+    const heroImageUrl = DEFAULT_HERO_IMAGE_URL;
 
     const patchPayload = {
       heroImage: {
@@ -361,7 +371,7 @@ export async function updateGooglePassStamps(
           uri: heroImageUrl,
         },
         contentDescription: {
-          defaultValue: { language: 'es-CO', value: `${store.merchant.name || 'Café Canelo'} Banner` },
+          defaultValue: { language: 'es-CO', value: `${store.merchant.name || 'Café Canelo'} Tarjeta Oficial` },
         },
       },
       loyaltyPoints: {

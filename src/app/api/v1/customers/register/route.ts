@@ -6,7 +6,7 @@ import { supabaseAdmin } from '@/lib/supabase/server';
 export async function POST(req: NextRequest) {
   try {
     const body = await req.json();
-    const { fullName, phone, birthdate, passType = 'google' } = body;
+    const { fullName, phone, birthdate, passType = 'google', serialNumber } = body;
 
     if (!fullName || fullName.trim().length < 3) {
       return NextResponse.json(
@@ -25,6 +25,7 @@ export async function POST(req: NextRequest) {
     const cleanPhone = phone.trim();
     const cleanName = fullName.trim();
     const selectedPassType = passType === 'apple' ? 'apple' : 'google';
+    const cleanSerial = typeof serialNumber === 'string' && serialNumber.trim() ? serialNumber.trim() : undefined;
 
     // 1. Registrar en el store central en memoria del servidor
     const localResult = fideliziaStore.registerCustomer({
@@ -32,6 +33,7 @@ export async function POST(req: NextRequest) {
       phone: cleanPhone,
       birthdate: birthdate || null,
       passType: selectedPassType,
+      serialNumber: cleanSerial,
     });
 
     // 2. Persistir en Supabase de forma resiliente

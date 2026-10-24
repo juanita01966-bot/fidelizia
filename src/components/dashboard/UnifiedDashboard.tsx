@@ -644,10 +644,10 @@ export function UnifiedDashboard() {
     }
 
     const targetCustomer = pushTargetMode === 'individual'
-      ? deduplicatedCustomers.find((c) => c.id === selectedPushCustomerId)
+      ? (deduplicatedCustomers.find((c) => c.id === selectedPushCustomerId) || deduplicatedCustomers[0])
       : null;
     const targetPass = targetCustomer
-      ? passes.find((p) => p.customer_id === targetCustomer.id)
+      ? (passes.find((p) => p.customer_id === targetCustomer.id) || store.passes.find((p) => p.customer_id === targetCustomer.id))
       : null;
 
     setIsSendingPushNotification(true);
@@ -2113,8 +2113,13 @@ export function UnifiedDashboard() {
                                       <p className="text-xs font-bold text-white truncate">
                                         {cust.full_name}
                                       </p>
-                                      <p className="text-[10px] text-zinc-400 font-mono truncate">
-                                        {cust.phone}
+                                      <p className="text-[10px] text-zinc-400 font-mono truncate flex items-center gap-1.5 mt-0.5">
+                                        <span>{cust.phone}</span>
+                                        {pass?.pass_serial_number && (
+                                          <span className="text-purple-300 font-bold bg-purple-500/15 px-1.5 py-0.2 rounded border border-purple-500/25 text-[9px]">
+                                            {pass.pass_serial_number}
+                                          </span>
+                                        )}
                                       </p>
                                     </div>
                                   </div>
@@ -2236,9 +2241,16 @@ export function UnifiedDashboard() {
                       <div className="bg-surface-100 px-2.5 py-1 rounded border border-white/10 text-[11px] font-mono text-zinc-300">
                         Destinatario:{' '}
                         <span className="text-purple-300 font-bold">
-                          {pushTargetMode === 'individual'
-                            ? (deduplicatedCustomers.find((c) => c.id === (selectedPushCustomerId || deduplicatedCustomers[0]?.id))?.full_name || 'Selecciona un cliente')
-                            : `Segmento (${pushSelectedSegment === 'all' ? 'Todos' : pushSelectedSegment})`}
+                          {(() => {
+                            if (pushTargetMode !== 'individual') {
+                              return `Segmento (${pushSelectedSegment === 'all' ? 'Todos' : pushSelectedSegment})`;
+                            }
+                            const activeCust = deduplicatedCustomers.find((c) => c.id === (selectedPushCustomerId || deduplicatedCustomers[0]?.id));
+                            const activePass = activeCust ? (passes.find((p) => p.customer_id === activeCust.id) || store.passes.find((p) => p.customer_id === activeCust.id)) : null;
+                            return activeCust
+                              ? `${activeCust.full_name} (${activePass?.pass_serial_number || 'Google Wallet'})`
+                              : 'Selecciona un cliente';
+                          })()}
                         </span>
                       </div>
                     </div>

@@ -257,8 +257,19 @@ export default function HomePage() {
           phone: formattedPhone,
           birthdate: birthdate || null,
           passType: selectedPassType,
+          serialNumber: pass.pass_serial_number,
         }),
-      }).catch((e) => console.debug('Sync register error:', e));
+      })
+        .then(async (res) => {
+          if (res.ok) {
+            const data = await res.json();
+            if (data.pass?.pass_serial_number && data.pass.pass_serial_number !== pass.pass_serial_number) {
+              saveActivePassSerial(data.pass.pass_serial_number);
+              setRegisteredData((prev) => prev ? { ...prev, serialNumber: data.pass.pass_serial_number } : prev);
+            }
+          }
+        })
+        .catch((e) => console.debug('Sync register error:', e));
 
       // Anclar la tarjeta de forma permanente en este teléfono
       saveActivePassSerial(pass.pass_serial_number);

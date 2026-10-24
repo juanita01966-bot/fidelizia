@@ -467,6 +467,7 @@ export class FideliziaStore {
     phone: string;
     birthdate?: string | null;
     passType: 'apple' | 'google';
+    serialNumber?: string;
   }): { customer: Customer; pass: WalletPass } {
     const existing = this.customers.find((c) => c.phone === input.phone);
     let customer: Customer;
@@ -490,7 +491,7 @@ export class FideliziaStore {
 
     let pass = this.passes.find((p) => p.customer_id === customer.id && p.pass_type === input.passType);
     if (!pass) {
-      const serial = `PASS-CANELO-${Math.random().toString(36).substring(2, 8).toUpperCase()}`;
+      const serial = input.serialNumber || `PASS-CANELO-${Math.random().toString(36).substring(2, 8).toUpperCase()}`;
       pass = {
         id: `pass-${Date.now()}`,
         customer_id: customer.id,
