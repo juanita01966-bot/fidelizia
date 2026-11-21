@@ -1,104 +1,120 @@
-// src/app/api/v1/customers/route.ts
-import { NextResponse } from 'next/server';
-import { fideliziaStore } from '@/lib/store/fidelizia-store';
-import { supabaseAdmin } from '@/lib/supabase/server';
-import { Customer, WalletPass } from '@/types/domain';
+import { NextRequest, NextResponse } from 'next/server';
+import { z } from 'zod';
+import { applyRateLimit } from '@/lib/api/rate-limit';
+import { parseJsonBody, parseSearchParams } from '@/lib/api/validation';
+import { requireAuth } from '@/lib/auth/session';
+import { customerRepo } from '@/lib/repositories';
+import { getSupabaseAdmin } from '@/lib/supabase/server';
 
-export async function GET() {
+export const runtime = 'nodejs';
+
+const CustomersQuerySchema = z.object({
+  segment: z.string().trim().max(40).optional(),
+  tier: z.enum(['bronze', 'silver', 'gold', 'champion']).optional(),
+  search: z.string().trim().max(100).optional(),
+});
+
+const CustomerPatchSchema = z.object({
+  customerId: z.string().uuid('ID de cliente inválido'),
+  customReward: z.string().trim().max(250).nullable().optional(),
+  discountPercentage: z.number().min(0).max(100).nullable().optional(),
+  loyaltyTier: z.enum(['bronze', 'silver', 'gold', 'champion']).optional(),
+});
+
+export async function GET(req: NextRequest) {
+  const auth = await requireAuth(req, ['admin', 'manager']);
+  if (auth.response) {
+    return auth.response;
+  }
+
+  const parsedQuery = parseSearchParams(req.url, CustomersQuerySchema);
+  if (!parsedQuery.success) {
+    return parsedQuery.response;
+  }
+
   try {
-    let customersList: Customer[] = fideliziaStore.customers;
-    let passesList: WalletPass[] = fideliziaStore.passes;
+    const supabase = getSupabaseAdmin();
+    const { customers, passes } = await customerRepo.listWithPassesByMerchant(
+      supabase,
+      auth.session.merchantId,
+      parsedQuery.data
+    );
 
-    try {
-      // 1. Obtener los clientes de Supabase con sus pases
-      const { data: dbCustomers, error: custErr } = await supabaseAdmin
-        .from('customers')
-        .select(`
-          id,
-          merchant_id,
-          phone,
-          full_name,
-          birthdate,
-          terms_accepted_at,
-          rfm_segment,
-          created_at,
-          updated_at,
-          wallet_passes (
-            id,
-            customer_id,
-            merchant_id,
-            pass_type,
-            pass_serial_number,
-            push_token,
-            authentication_token,
-            current_stamps,
-            total_visits,
-            total_rewards_redeemed,
-            last_visit_at,
-            status,
-            created_at,
-            updated_at
-          )
-        `)
-        .order('created_at', { ascending: false });
-
-      if (!custErr && dbCustomers && dbCustomers.length > 0) {
-        const mappedCustomers: Customer[] = [];
-        const mappedPasses: WalletPass[] = [];
-
-        for (const dc of dbCustomers) {
-          mappedCustomers.push({
-            id: dc.id,
-            merchant_id: dc.merchant_id,
-            phone: dc.phone,
-            full_name: dc.full_name,
-            birthdate: dc.birthdate || null,
-            terms_accepted_at: dc.terms_accepted_at,
-            rfm_segment: (dc.rfm_segment as any) || 'new',
-            created_at: dc.created_at,
-            updated_at: dc.updated_at,
-          });
-
-          if (Array.isArray(dc.wallet_passes)) {
-            for (const dp of dc.wallet_passes) {
-              mappedPasses.push({
-                id: dp.id,
-                customer_id: dp.customer_id,
-                merchant_id: dp.merchant_id,
-                pass_type: dp.pass_type as any,
-                pass_serial_number: dp.pass_serial_number,
-                push_token: dp.push_token || null,
-                authentication_token: dp.authentication_token || `auth-${dp.pass_serial_number}`,
-                current_stamps: dp.current_stamps,
-                total_visits: dp.total_visits,
-                total_rewards_redeemed: dp.total_rewards_redeemed,
-                last_visit_at: dp.last_visit_at || null,
-                status: dp.status as any,
-                created_at: dp.created_at,
-                updated_at: dp.updated_at,
-              });
-            }
-          }
-        }
-
-        customersList = mappedCustomers;
-        passesList = mappedPasses;
-
-        // Mantener la memoria del servidor en perfecta sincronía con Supabase
-        fideliziaStore.syncFromRemote({ customers: mappedCustomers, passes: mappedPasses });
-      }
-    } catch (dbErr) {
-      console.warn('[Customers GET API] Supabase query error, fallback to memory:', dbErr);
-    }
+    const sanitizedPasses = passes.map(({ authentication_token: _auth, push_token: pushToken, ...rest }) => ({
+      ...rest,
+      has_push_token: Boolean(pushToken),
+      push_token: pushToken ? 'registered' : null,
+    }));
 
     return NextResponse.json({
       success: true,
-      count: customersList.length,
-      customers: customersList,
-      passes: passesList,
+      count: customers.length,
+      customers,
+      passes: sanitizedPasses,
     });
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : 'Error al listar clientes';
-    return NextResponse.json({ error: message }, { status: 500 });
+    return NextResponse.json({ error: 'CUSTOMERS_FETCH_FAILED', message }, { status: 500 });
+  }
+}
+
+export async function PATCH(req: NextRequest) {
+  const auth = await requireAuth(req, ['admin', 'manager']);
+  if (auth.response) {
+    return auth.response;
+  }
+
+  const rateLimit = applyRateLimit(req, 'customers:patch', {
+    limit: 60,
+    windowMs: 60_000,
+    keySuffix: auth.session.userId,
+  });
+  if (!rateLimit.allowed) {
+    return rateLimit.response;
+  }
+
+  const parsed = await parseJsonBody(req, CustomerPatchSchema);
+  if (!parsed.success) {
+    return parsed.response;
+  }
+
+  const { customerId, customReward, discountPercentage, loyaltyTier } = parsed.data;
+
+  try {
+    const supabase = getSupabaseAdmin();
+    let customer = await customerRepo.findById(supabase, auth.session.merchantId, customerId);
+    if (!customer) {
+      return NextResponse.json(
+        { error: 'CUSTOMER_NOT_FOUND', message: 'Cliente no encontrado en este comercio' },
+        { status: 404 }
+      );
+    }
+
+    if (customReward !== undefined || discountPercentage !== undefined) {
+      customer = await customerRepo.updateBenefits(
+        supabase,
+        auth.session.merchantId,
+        customerId,
+        customReward !== undefined ? customReward : customer.custom_reward ?? null,
+        discountPercentage !== undefined ? discountPercentage : customer.discount_percentage ?? null
+      );
+    }
+
+    if (loyaltyTier !== undefined) {
+      customer = await customerRepo.updateLoyaltyTier(
+        supabase,
+        auth.session.merchantId,
+        customerId,
+        loyaltyTier
+      );
+    }
+
+    return NextResponse.json(
+      { success: true, customer },
+      { status: 200, headers: rateLimit.headers }
+    );
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : 'Error al actualizar cliente';
+    return NextResponse.json({ error: 'CUSTOMER_UPDATE_FAILED', message }, { status: 500 });
   }
 }

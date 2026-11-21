@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useRef, useCallback } from 'react';
 import Link from 'next/link';
 import { 
   LayoutDashboard, 
@@ -44,7 +44,8 @@ import {
   Smartphone,
   Zap,
   CheckCheck,
-  History
+  History,
+  Menu
 } from 'lucide-react';
 import { Badge } from '@/components/ui/Badge';
 import { Button } from '@/components/ui/Button';
@@ -73,7 +74,6 @@ import { formatCurrency, cn } from '@/lib/utils';
 import { soundEngine } from '@/lib/audio/sound-effects';
 import confetti from 'canvas-confetti';
 import { toast } from 'sonner';
-import { supabase } from '@/lib/supabase/client';
 
 // PESTAÑAS CANÓNICAS DEL DSB (INCLUYE NOTIFICACIONES PUSH A WALLETS)
 type DashboardTab = 'overview' | 'customers' | 'notifications' | 'bookings' | 'settings';
@@ -104,14 +104,15 @@ export function UnifiedDashboard() {
   const [session, setSession] = useState(sessionManager.getSession());
   const [activeTab, setActiveTab] = useState<DashboardTab>('overview');
   const [settingsSubTab, setSettingsSubTab] = useState<SettingsSubTab>('cards');
+  const [isMobileNavOpen, setIsMobileNavOpen] = useState(false);
 
-  // Estado reactivo del store
-  const [customers, setCustomers] = useState(store.customers);
-  const [transactions, setTransactions] = useState(store.transactions);
-  const [passes, setPasses] = useState(store.passes);
-  const [fraudAlerts, setFraudAlerts] = useState(store.fraudAlerts);
-  const [reservations, setReservations] = useState(store.reservations);
-  const [employees, setEmployees] = useState(store.employees);
+  // Estado reactivo hidratado desde /api/v1/admin/overview (Supabase Multi-Tenant)
+  const [customers, setCustomers] = useState<Customer[]>([]);
+  const [transactions, setTransactions] = useState(store.transactions.slice(0, 0));
+  const [passes, setPasses] = useState(store.passes.slice(0, 0));
+  const [fraudAlerts, setFraudAlerts] = useState(store.fraudAlerts.slice(0, 0));
+  const [reservations, setReservations] = useState(store.reservations.slice(0, 0));
+  const [employees, setEmployees] = useState<Employee[]>([]);
   const [merchant, setMerchant] = useState(store.merchant);
 
   // Filtro de Rangos en Clientes
@@ -154,26 +155,7 @@ export function UnifiedDashboard() {
     time: string;
     status: 'delivered' | 'pending';
     passType: string;
-  }>>([
-    {
-      id: 'push-sample-1',
-      targetName: 'Todos los Comensales (Campaña General)',
-      title: '☕ ¡2x1 en Café Canelo Hoy!',
-      body: '¡Presenta tu tarjeta digital en barra y lleva 2 bebidas por el precio de 1! Válido hoy.',
-      time: 'Hoy a las 09:30 AM',
-      status: 'delivered',
-      passType: 'Google Wallet & Apple Wallet'
-    },
-    {
-      id: 'push-sample-2',
-      targetName: 'Clientes VIP Champions',
-      title: '⭐ ¡Doble Sello de Bonificación!',
-      body: 'Por ser cliente VIP, hoy cada consumo te suma el doble de sellos hacia tu regalo.',
-      time: 'Ayer a las 04:15 PM',
-      status: 'delivered',
-      passType: 'Google Wallet & Apple Wallet'
-    }
-  ]);
+  }>>([]);
 
   const PUSH_TEMPLATES = [
     {
@@ -192,7 +174,7 @@ export function UnifiedDashboard() {
       id: 'double-stamps',
       label: '⭐ Doble Sello Hoy',
       title: '⭐ ¡Doble Sello en tu Visita!',
-      message: '¡Hoy cada consumo en Café Canelo te otorga 2 sellos en lugar de 1! Avanza más rápido hacia tu recompensa.',
+      message: `¡Hoy cada consumo en ${merchant.name || 'nuestro local'} te otorga 2 sellos en lugar de 1! Avanza más rápido hacia tu recompensa.`,
     },
     {
       id: 'free-reward',
@@ -203,7 +185,7 @@ export function UnifiedDashboard() {
     {
       id: 'custom',
       label: '✍️ Personalizado',
-      title: '✨ ¡Sorpresa Especial en Café Canelo!',
+      title: `✨ ¡Sorpresa Especial en ${merchant.name || 'Tu Negocio'}!`,
       message: 'Tenemos algo preparado especialmente para ti. Presenta tu tarjeta de cliente frecuente en barra.',
     },
   ];
@@ -213,12 +195,12 @@ export function UnifiedDashboard() {
     store.merchant.tier_config || DEFAULT_TIER_CONFIG
   );
 
-  // Modal de Modificación Manual de Rango de Cliente (Protegido con AdminMaster2026@)
+  // Modal de Modificación Manual de Rango de Cliente
   const [tierChangeTarget, setTierChangeTarget] = useState<{
     customer: Customer;
     newTier: LoyaltyTier;
   } | null>(null);
-  const [tierChangeSecurityKey, setTierChangeSecurityKey] = useState('');
+  const [isUpdatingTier, setIsUpdatingTier] = useState(false);
 
   // Las 3 Opciones Preconfiguradas de Recompensas
   const [promoOptions, setPromoOptions] = useState<[string, string, string]>(
@@ -273,8 +255,8 @@ export function UnifiedDashboard() {
   );
   const [designerPreviewTier, setDesignerPreviewTier] = useState<LoyaltyTier>('champion');
 
-  // Seguridad & Credenciales Maestras
-  const [securityKeyInput, setSecurityKeyInput] = useState('');
+  // Seguridad & Credenciales de Acceso DSB
+  const [targetSecurityEmployeeId, setTargetSecurityEmployeeId] = useState('');
   const [newAdminPasswordInput, setNewAdminPasswordInput] = useState('');
   const [cooldownHoursInput, setCooldownHoursInput] = useState(store.merchant.cooldown_hours || 3);
   const [geofenceMetersInput, setGeofenceMetersInput] = useState(
@@ -288,161 +270,141 @@ export function UnifiedDashboard() {
   const [newEmpRole, setNewEmpRole] = useState<'cashier' | 'manager'>('cashier');
   const [isAddingEmp, setIsAddingEmp] = useState(false);
 
-  // Escuchar mutaciones del store y de sesión
+  // Escuchar mutaciones de sesión autenticada
   useEffect(() => {
     const unsubSession = sessionManager.subscribe(() => {
       setSession(sessionManager.getSession());
     });
-    const unsubStore = store.subscribe(() => {
-      setCustomers([...store.customers]);
-      setTransactions([...store.transactions]);
-      setPasses([...store.passes]);
-      setFraudAlerts([...store.fraudAlerts]);
-      setReservations([...store.reservations]);
-      setEmployees([...store.employees]);
-      setMerchant({ ...store.merchant });
-      if (store.merchant.tier_config) {
-        setTierConfig(store.merchant.tier_config);
-      }
-      if (store.merchant.preconfigured_rewards) {
-        setPromoOptions(store.merchant.preconfigured_rewards);
-      }
-      // NOTA: Los inputs de diseño (cardPattern, cardMorphology, cardGradient, etc.)
-      // NO se sobreescriben aquí para permitir que el usuario edite sin reseteos automáticos.
-    });
-
     return () => {
       unsubSession();
-      unsubStore();
     };
-  }, [sessionManager, store]);
+  }, [sessionManager]);
 
-  // Sincronización transparente con Supabase y Backend
+  // Sincronización con Supabase vía endpoint autenticado /api/v1/admin/overview
   const [isSyncingRemote, setIsSyncingRemote] = useState(false);
+  const isFetchingRef = useRef(false);
+  const overviewAbortRef = useRef<AbortController | null>(null);
 
-  const fetchRemoteData = async (silent = false, syncMerchant = false) => {
+  const fetchRemoteData = useCallback(async (silent = false, syncMerchant = false) => {
+    if (silent && isFetchingRef.current) {
+      return;
+    }
+
+    if (!silent && overviewAbortRef.current) {
+      overviewAbortRef.current.abort();
+    }
+
+    const controller = new AbortController();
+    overviewAbortRef.current = controller;
+    isFetchingRef.current = true;
+
     try {
       setIsSyncingRemote(true);
-      // 1. Obtener clientes de Supabase (Siempre)
-      const custRes = await fetch('/api/v1/customers');
-      if (custRes.ok) {
-        const custData = await custRes.json();
-        if (custData.customers) {
-          store.syncFromRemote({ customers: custData.customers, passes: custData.passes });
-          setCustomers([...store.customers]);
-          setPasses([...store.passes]);
-        }
+      const res = await fetch('/api/v1/admin/overview', {
+        method: 'GET',
+        credentials: 'include',
+        cache: 'no-store',
+        signal: controller.signal,
+      });
+
+      if (res.status === 401) {
+        void sessionManager.refreshSession();
+        return;
       }
 
-      // 2. Obtener configuraciones del merchant SOLO si syncMerchant es true (al inicio o manual)
-      if (syncMerchant) {
-        const merchRes = await fetch('/api/v1/merchant/settings');
-        if (merchRes.ok) {
-          const merchData = await merchRes.json();
-          if (merchData.merchant) {
-            store.syncFromRemote({ merchant: merchData.merchant });
-            setMerchant({ ...store.merchant });
+      if (!res.ok) {
+        if (!silent) {
+          toast.error('No se pudieron sincronizar los datos del servidor.');
+        }
+        return;
+      }
 
-            // Sincronizar inputs del formulario de diseño de la tarjeta
-            const m = merchData.merchant;
-            if (m.card_pattern) setCardPatternInput(m.card_pattern);
-            if (typeof m.show_emv_chip === 'boolean') setShowEmvChipInput(m.show_emv_chip);
-            if (typeof m.show_hologram === 'boolean') setShowHologramInput(m.show_hologram);
-            if (m.loyalty_program_mode) setLoyaltyProgramModeInput(m.loyalty_program_mode);
-            if (m.card_morphology) setCardMorphologyInput(m.card_morphology);
-            if (m.card_gradient) setCardGradientInput(m.card_gradient);
-            if (m.reward_milestones) setRewardMilestonesInput(m.reward_milestones);
-            if (m.brand_color) setBrandColorInput(m.brand_color);
-            if (m.stamps_needed) setStampsNeededInput(m.stamps_needed);
-            if (m.reward_description) setRewardDescInput(m.reward_description);
+      const data = await res.json();
+      if (controller.signal.aborted) return;
+
+      if (Array.isArray(data.customers)) setCustomers(data.customers);
+      if (Array.isArray(data.passes)) setPasses(data.passes);
+      if (Array.isArray(data.transactions)) setTransactions(data.transactions);
+      if (Array.isArray(data.reservations)) setReservations(data.reservations);
+      if (Array.isArray(data.fraudAlerts)) setFraudAlerts(data.fraudAlerts);
+      if (Array.isArray(data.employees)) {
+        setEmployees(data.employees);
+        setTargetSecurityEmployeeId((prev) => prev || session.userId || data.employees[0]?.id || '');
+      }
+
+      if (data.merchant) {
+        setMerchant(data.merchant);
+        if (syncMerchant) {
+          const m = data.merchant;
+          if (m.tier_config) setTierConfig(m.tier_config);
+          if (m.preconfigured_rewards) setPromoOptions(m.preconfigured_rewards);
+          if (m.card_pattern) setCardPatternInput(m.card_pattern);
+          if (typeof m.show_emv_chip === 'boolean') setShowEmvChipInput(m.show_emv_chip);
+          if (typeof m.show_hologram === 'boolean') setShowHologramInput(m.show_hologram);
+          if (m.loyalty_program_mode) setLoyaltyProgramModeInput(m.loyalty_program_mode);
+          if (m.card_morphology) setCardMorphologyInput(m.card_morphology);
+          if (m.card_gradient) setCardGradientInput(m.card_gradient);
+          if (m.reward_milestones) setRewardMilestonesInput(m.reward_milestones);
+          if (m.brand_color) setBrandColorInput(m.brand_color);
+          if (m.stamps_needed) setStampsNeededInput(m.stamps_needed);
+          if (m.reward_description) setRewardDescInput(m.reward_description);
+          if (typeof m.cooldown_hours === 'number') setCooldownHoursInput(m.cooldown_hours);
+          if (typeof m.scanner_geofence_meters === 'number') {
+            setGeofenceMetersInput(m.scanner_geofence_meters);
           }
         }
       }
+
       if (!silent) {
         soundEngine.playScanSuccess();
         toast.success('Directorio y configuraciones sincronizados con Supabase.');
       }
-    } catch (e) {
-      console.warn('Error fetching remote data in UnifiedDashboard:', e);
+    } catch (e: unknown) {
+      if (e instanceof Error && e.name === 'AbortError') return;
+      console.warn('Error fetching remote overview in UnifiedDashboard:', e);
     } finally {
+      if (overviewAbortRef.current === controller) {
+        overviewAbortRef.current = null;
+      }
+      isFetchingRef.current = false;
       setIsSyncingRemote(false);
     }
-  };
+  }, [session.userId, sessionManager]);
 
-  // Sincronización continua en tiempo real (Supabase Realtime + Polling Inteligente + BroadcastChannel)
+  // Carga inicial + Polling resiliente + BroadcastChannel entre pestañas
   useEffect(() => {
-    // 1. Carga inicial (Sincroniza clientes y configuración de merchant)
-    fetchRemoteData(true, true);
+    void fetchRemoteData(true, true);
 
-    // 2. Supabase Realtime WebSocket Listener (para comensales desde celulares remotos)
-    let channel: any = null;
-    try {
-      channel = supabase
-        .channel('fidelizia-realtime-dashboard')
-        .on(
-          'postgres_changes',
-          { event: '*', schema: 'public', table: 'customers' },
-          (payload: any) => {
-            fetchRemoteData(true, false);
-            if (payload?.eventType === 'INSERT' && payload.new) {
-              soundEngine.playScanSuccess();
-              toast.success(`🎉 ¡Nuevo cliente en tiempo real: ${payload.new.full_name || 'Comensal'}!`, {
-                description: 'Se ha sincronizado automáticamente en la tabla.',
-              });
-            }
-          }
-        )
-        .on(
-          'postgres_changes',
-          { event: '*', schema: 'public', table: 'wallet_passes' },
-          () => {
-            fetchRemoteData(true, false);
-          }
-        )
-        .on(
-          'postgres_changes',
-          { event: '*', schema: 'public', table: 'merchants' },
-          () => {
-            fetchRemoteData(true, true);
-          }
-        )
-        .subscribe();
-    } catch (realtimeErr) {
-      console.warn('[Realtime Supabase] Subscripción fallback:', realtimeErr);
-    }
-
-    // 3. Heartbeat Polling Inteligente (cada 4 segundos si la ventana está visible: SOLO clientes/pases)
     const intervalId = setInterval(() => {
       if (typeof document !== 'undefined' && document.visibilityState === 'visible') {
-        fetchRemoteData(true, false);
+        void fetchRemoteData(true, false);
       }
-    }, 4000);
+    }, 8000);
 
-    // 4. BroadcastChannel entre pestañas locales del mismo navegador (<5ms)
     let bc: BroadcastChannel | null = null;
     try {
       bc = new BroadcastChannel('fidelizia_realtime_sync');
       bc.onmessage = (event) => {
         if (event.data?.type === 'CUSTOMER_REGISTERED') {
           soundEngine.playScanSuccess();
-          toast.success(`🎉 ¡Nuevo cliente registrado: ${event.data.customer?.full_name}!`);
-          fetchRemoteData(true, false);
+          toast.success(`🎉 ¡Nuevo cliente registrado: ${event.data.customer?.full_name || 'Comensal'}!`);
+          void fetchRemoteData(true, false);
         }
       };
-    } catch (e) {
+    } catch {
       // BroadcastChannel opcional
     }
 
     return () => {
-      if (channel) {
-        supabase.removeChannel(channel);
+      if (overviewAbortRef.current) {
+        overviewAbortRef.current.abort();
       }
       clearInterval(intervalId);
       if (bc) {
         bc.close();
       }
     };
-  }, []);
+  }, [fetchRemoteData]);
 
   const isAdmin = session.role === 'admin';
 
@@ -495,46 +457,31 @@ export function UnifiedDashboard() {
     }
 
     try {
-      // 1. Petición al backend central conectado a Supabase
       const response = await fetch('/api/v1/customers/register', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
         body: JSON.stringify({
           fullName: regFullName.trim(),
           phone: regPhone.trim(),
           birthdate: regBirthdate || null,
           passType: regPassType,
-          merchantSlug: store.merchant.slug,
+          merchantSlug: merchant.slug,
+          termsAccepted: true,
         }),
       });
 
-      let customerName = regFullName.trim();
-      let passSerial = `PASS-CANELO-${Date.now().toString().slice(-4)}`;
-
-      if (response.ok) {
-        const resJson = await response.json();
-        customerName = resJson.customer.full_name;
-        passSerial = resJson.pass.pass_serial_number;
-        store.registerCustomer({
-          fullName: customerName,
-          phone: regPhone.trim(),
-          birthdate: regBirthdate || null,
-          passType: regPassType,
-        });
-      } else {
-        const local = store.registerCustomer({
-          fullName: regFullName.trim(),
-          phone: regPhone.trim(),
-          birthdate: regBirthdate || null,
-          passType: regPassType,
-        });
-        customerName = local.customer.full_name;
-        passSerial = local.pass.pass_serial_number;
+      const resJson = await response.json();
+      if (!response.ok || !resJson.customer || !resJson.pass) {
+        throw new Error(resJson.message || resJson.error || 'No se pudo registrar al cliente');
       }
+
+      const customerName = resJson.customer.full_name;
+      const passSerial = resJson.pass.pass_serial_number;
 
       soundEngine.playRedeemCelebration();
       confetti({ particleCount: 60, spread: 70 });
-      toast.success(`¡Cliente registrado con éxito en el sistema!`, {
+      toast.success('¡Cliente registrado con éxito en el sistema!', {
         description: `${customerName} (${passSerial}) · Pase ${regPassType === 'apple' ? 'Apple' : 'Google'} Wallet activo.`,
       });
 
@@ -542,8 +489,9 @@ export function UnifiedDashboard() {
       setRegFullName('');
       setRegPhone('+573');
       setRegBirthdate('');
-      fetchRemoteData(true);
+      await fetchRemoteData(true, false);
     } catch (err: unknown) {
+      soundEngine.playFraudAlert();
       toast.error(err instanceof Error ? err.message : 'Error al registrar cliente');
     }
   };
@@ -572,7 +520,7 @@ export function UnifiedDashboard() {
     }
   };
 
-  const handleSaveCustomerBenefits = () => {
+  const handleSaveCustomerBenefits = async () => {
     if (!editingCustomer) return;
     const pass = passes.find((p) => p.customer_id === editingCustomer.id);
     const rewardsRedeemed = pass?.total_rewards_redeemed || 0;
@@ -590,12 +538,28 @@ export function UnifiedDashboard() {
         discountVal = Math.min(Math.max(benefitDiscount, 0), 50);
       }
 
-      store.updateCustomerBenefits(editingCustomer.id, finalReward, discountVal);
+      const res = await fetch('/api/v1/customers', {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify({
+          customerId: editingCustomer.id,
+          customReward: finalReward || null,
+          discountPercentage: discountVal,
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        throw new Error(data.message || data.error || 'Error al guardar beneficio');
+      }
+
       soundEngine.playRedeemCelebration();
       confetti({ particleCount: 50, spread: 60 });
       toast.success(`Beneficios actualizados para ${editingCustomer.full_name}`);
       setEditingCustomer(null);
+      await fetchRemoteData(true, false);
     } catch (err: unknown) {
+      soundEngine.playFraudAlert();
       toast.error(err instanceof Error ? err.message : 'Error al guardar beneficio');
     }
   };
@@ -606,7 +570,7 @@ export function UnifiedDashboard() {
     setIsPushOfferModalOpen(true);
   };
 
-  const handleSendPushOffer = (e: React.FormEvent) => {
+  const handleSendPushOffer = async (e: React.FormEvent) => {
     e.preventDefault();
     const offerText = selectedPushOffer === 'custom' ? customPushMessage.trim() : selectedPushOffer;
 
@@ -615,19 +579,47 @@ export function UnifiedDashboard() {
       return;
     }
 
-    const res = store.sendPushCampaign({
-      segment: 'at_risk',
-      title: '¡Te extrañamos en Café Canelo!',
-      body: offerText,
-    });
+    const toastId = toast.loading('Enviando oferta push a Wallet...');
+    try {
+      const payload = targetRiskCustomerId
+        ? {
+            customerId: targetRiskCustomerId,
+            segment: 'individual' as const,
+            title: `¡Te extrañamos en ${merchant.name || 'nuestro local'}!`,
+            body: offerText,
+          }
+        : {
+            segment: 'at_risk' as const,
+            title: `¡Te extrañamos en ${merchant.name || 'nuestro local'}!`,
+            body: offerText,
+          };
 
-    soundEngine.playRedeemCelebration();
-    confetti({ particleCount: 70, spread: 65 });
-    toast.success(`¡Oferta push disparada con éxito!`, {
-      description: `Impacto en ${res.customersImpacted} comensales en riesgo a través de sus tarjetas Apple & Google Wallet.`,
-    });
-    setIsPushOfferModalOpen(false);
-    setCustomPushMessage('');
+      const res = await fetch('/api/v1/notifications/push', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify(payload),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        throw new Error(data.message || data.error || 'No se pudo emitir la oferta push');
+      }
+
+      const deliveredCount = (data.googleWalletDelivered ?? 0) + (data.appleWalletDelivered ?? 0);
+      soundEngine.playRedeemCelebration();
+      confetti({ particleCount: 70, spread: 65 });
+      toast.success('¡Oferta push disparada con éxito!', {
+        id: toastId,
+        description: `Impacto en ${deliveredCount}/${data.recipientsCount ?? deliveredCount} pases digitales (Google Wallet: ${data.googleWalletDelivered ?? 0} · Apple Wallet: ${data.appleWalletDelivered ?? 0}).`,
+      });
+      setIsPushOfferModalOpen(false);
+      setCustomPushMessage('');
+    } catch (err: unknown) {
+      soundEngine.playFraudAlert();
+      toast.error(err instanceof Error ? err.message : 'Error al emitir oferta push', {
+        id: toastId,
+      });
+    }
   };
 
   // 3.1 ENVIAR NOTIFICACIÓN PUSH A CLIENTE INDIVIDUAL (2x1) O CAMPAÑA MASIVA A WALLETS
@@ -638,34 +630,39 @@ export function UnifiedDashboard() {
       return;
     }
 
-    if (pushTargetMode === 'individual' && !selectedPushCustomerId) {
+    const effectiveTargetCustomer =
+      pushTargetMode === 'individual'
+        ? deduplicatedCustomers.find(
+            (c) => c.id === (selectedPushCustomerId || deduplicatedCustomers[0]?.id)
+          ) || null
+        : null;
+
+    if (pushTargetMode === 'individual' && !effectiveTargetCustomer) {
       toast.error('Selecciona un cliente de la lista para enviarle la notificación');
       return;
     }
 
-    const targetCustomer = pushTargetMode === 'individual'
-      ? (deduplicatedCustomers.find((c) => c.id === selectedPushCustomerId) || deduplicatedCustomers[0])
-      : null;
-    const targetPass = targetCustomer
-      ? (passes.find((p) => p.customer_id === targetCustomer.id) || store.passes.find((p) => p.customer_id === targetCustomer.id))
+    const targetPass = effectiveTargetCustomer
+      ? passes.find((p) => p.customer_id === effectiveTargetCustomer.id) || null
       : null;
 
     setIsSendingPushNotification(true);
     const toastId = toast.loading(
       pushTargetMode === 'individual'
-        ? `Enviando notificación push a la Wallet de ${targetCustomer?.full_name || 'cliente'}...`
-        : `Disparando campaña push masiva a Wallets...`
+        ? `Enviando notificación push a la Wallet de ${effectiveTargetCustomer?.full_name || 'cliente'}...`
+        : 'Disparando campaña push masiva a Wallets...'
     );
 
     try {
-      const payload: any = {
+      const payload: Record<string, unknown> = {
         title: pushTitle.trim(),
         body: pushMessage.trim(),
       };
 
-      if (pushTargetMode === 'individual') {
-        payload.customerId = targetCustomer?.id;
-        payload.targetCustomerName = targetCustomer?.full_name;
+      if (pushTargetMode === 'individual' && effectiveTargetCustomer) {
+        payload.segment = 'individual';
+        payload.customerId = effectiveTargetCustomer.id;
+        payload.targetCustomerName = effectiveTargetCustomer.full_name;
         if (targetPass?.pass_serial_number) {
           payload.serialNumber = targetPass.pass_serial_number;
         }
@@ -676,39 +673,49 @@ export function UnifiedDashboard() {
       const res = await fetch('/api/v1/notifications/push', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
         body: JSON.stringify(payload),
       });
 
       const data = await res.json();
 
       if (!res.ok) {
-        throw new Error(data.error || 'Error al emitir la notificación push');
+        throw new Error(data.message || data.error || 'Error al emitir la notificación push');
       }
+
+      const googleDelivered = data.googleWalletDelivered ?? 0;
+      const appleDelivered = data.appleWalletDelivered ?? 0;
 
       soundEngine.playRedeemCelebration();
       confetti({ particleCount: 70, spread: 65 });
 
       toast.success(
         pushTargetMode === 'individual'
-          ? `¡Notificación enviada a la Wallet de ${targetCustomer?.full_name}!`
-          : `¡Campaña push enviada a ${data.recipientsCount || 'todos los'} clientes!`,
+          ? `¡Notificación enviada a la Wallet de ${effectiveTargetCustomer?.full_name}!`
+          : `¡Campaña push enviada a ${data.recipientsCount || 0} pases!`,
         {
           id: toastId,
-          description: `Impacto directo en pantalla de bloqueo (${data.googleWalletDelivered ?? 1} pases actualizados).`,
+          description: `Google Wallet: ${googleDelivered} · Apple Wallet: ${appleDelivered} pases actualizados.`,
         }
       );
 
       // Registrar en el historial de la pantalla
       const newEntry = {
         id: `push-${Date.now()}`,
-        targetName: pushTargetMode === 'individual' 
-          ? (targetCustomer?.full_name || 'Cliente')
-          : `Segmento: ${pushSelectedSegment === 'all' ? 'Todos los Clientes' : pushSelectedSegment}`,
+        targetName:
+          pushTargetMode === 'individual'
+            ? effectiveTargetCustomer?.full_name || 'Cliente'
+            : `Segmento: ${pushSelectedSegment === 'all' ? 'Todos los Clientes' : pushSelectedSegment}`,
         title: pushTitle.trim(),
         body: pushMessage.trim(),
-        time: 'Hace un momento',
+        time: new Date().toLocaleTimeString('es-CO', { hour: '2-digit', minute: '2-digit' }),
         status: 'delivered' as const,
-        passType: targetPass?.pass_type === 'apple' ? 'Apple Wallet' : 'Google Wallet',
+        passType:
+          pushTargetMode === 'individual'
+            ? targetPass?.pass_type === 'apple'
+              ? 'Apple Wallet'
+              : 'Google Wallet'
+            : `Google (${googleDelivered}) · Apple (${appleDelivered})`,
       };
       setPushHistoryLog((prev) => [newEntry, ...prev]);
 
@@ -723,17 +730,28 @@ export function UnifiedDashboard() {
   };
 
   // 4. GUARDAR LAS 3 OPCIONES PRECONFIGURADAS DE RECOMPENSAS
-  const handleSavePromoOptions = () => {
+  const handleSavePromoOptions = async () => {
     try {
-      store.updatePreconfiguredRewards(promoOptions);
+      const res = await fetch('/api/v1/merchant/settings', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify({ preconfigured_rewards: promoOptions }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        throw new Error(data.message || data.error || 'Error al actualizar opciones');
+      }
       soundEngine.playScanSuccess();
-      toast.success('Las 3 opciones preconfiguradas de promoción fueron actualizadas.');
+      toast.success('Las 3 opciones preconfiguradas de promoción fueron actualizadas en Supabase.');
+      await fetchRemoteData(true, true);
     } catch (err: unknown) {
+      soundEngine.playFraudAlert();
       toast.error(err instanceof Error ? err.message : 'Error al actualizar opciones');
     }
   };
 
-  // 5. GUARDAR DISEÑO ULTRA-PREMIUM DE TARJETA EN CALIENTE (CON SINCRONIZACIÓN EN GOOGLE WALLET API)
+  // 5. GUARDAR DISEÑO ULTRA-PREMIUM DE TARJETA EN CALIENTE (CON SINCRONIZACIÓN EN GOOGLE & APPLE WALLET)
   const handleSaveCardDesign = async () => {
     const payload = {
       brand_color: brandColorInput,
@@ -748,37 +766,34 @@ export function UnifiedDashboard() {
       reward_milestones: rewardMilestonesInput,
     };
 
-    // Actualización reactiva inmediata en local
-    store.updateMerchantSettings(payload);
-
-    const toastId = toast.loading('Sincronizando diseño con Supabase y Google Wallet API...');
+    const toastId = toast.loading('Sincronizando diseño con Supabase, Google Wallet y Apple Wallet...');
     try {
       const res = await fetch('/api/v1/merchant/settings', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
         body: JSON.stringify(payload),
       });
 
-      if (res.ok) {
-        const data = await res.json();
-        soundEngine.playScanSuccess();
-        toast.success(
-          data.googleWalletSync 
-            ? '¡Diseño propagado a Google Wallet y Supabase con éxito!'
-            : 'Diseño guardado en Supabase (Google Wallet operando en modo local)',
-          {
-            id: toastId,
-            description: 'Las tarjetas de fidelización en los teléfonos de tus clientes se actualizarán automáticamente.',
-          }
-        );
-        fetchRemoteData(true, true);
-      } else {
-        soundEngine.playScanSuccess();
-        toast.success('Diseño guardado localmente en tu navegador.', { id: toastId });
+      const data = await res.json();
+      if (!res.ok) {
+        throw new Error(data.message || data.error || 'No se pudo guardar el diseño en el servidor');
       }
-    } catch (err: unknown) {
+
       soundEngine.playScanSuccess();
-      toast.success('Diseño guardado en memoria local.', { id: toastId });
+      toast.success(
+        data.googleWalletSync
+          ? '¡Diseño propagado a Google Wallet, Apple Wallet y Supabase con éxito!'
+          : 'Diseño guardado en Supabase (Google Wallet pendiente de credenciales)',
+        {
+          id: toastId,
+          description: `Apple pases notificados: ${data.appleWalletUpdated ?? 0}. Las tarjetas activas reflejarán el cambio.`,
+        }
+      );
+      await fetchRemoteData(true, true);
+    } catch (err: unknown) {
+      soundEngine.playFraudAlert();
+      toast.error(err instanceof Error ? err.message : 'Error al sincronizar diseño', { id: toastId });
     }
   };
 
@@ -822,145 +837,217 @@ export function UnifiedDashboard() {
   };
 
   // 6. GUARDAR UMBRALES DE RANGOS (TIERS)
-  const handleSaveTierConfig = () => {
+  const handleSaveTierConfig = async () => {
     try {
-      store.updateTierConfig(tierConfig);
+      const res = await fetch('/api/v1/merchant/settings', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify({ tier_config: tierConfig }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        throw new Error(data.message || data.error || 'Error al actualizar umbrales');
+      }
       soundEngine.playScanSuccess();
-      toast.success('Umbrales de fidelidad actualizados y rangos recalculados.');
+      toast.success('Umbrales de fidelidad actualizados y rangos recalculados en Supabase.');
+      await fetchRemoteData(true, true);
     } catch (err: unknown) {
+      soundEngine.playFraudAlert();
       toast.error(err instanceof Error ? err.message : 'Error al actualizar umbrales');
     }
   };
 
-  // 7. CAMBIO MANUAL DE RANGO DE CLIENTE CON CLAVE MAESTRA
-  const handleConfirmTierChangeWithMasterKey = (e: React.FormEvent) => {
+  // 7. CAMBIO MANUAL DE RANGO DE CLIENTE (SOLO SESIÓN ADMIN/MANAGER AUTENTICADA)
+  const handleConfirmTierChange = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!tierChangeTarget) return;
 
-    if (!tierChangeSecurityKey.trim()) {
-      toast.error('Ingresa la contraseña de seguridad maestra');
-      return;
-    }
+    try {
+      setIsUpdatingTier(true);
+      const res = await fetch('/api/v1/customers', {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify({
+          customerId: tierChangeTarget.customer.id,
+          loyaltyTier: tierChangeTarget.newTier,
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        throw new Error(data.message || data.error || 'No se pudo actualizar el rango');
+      }
 
-    const res = store.updateCustomerTierManually(
-      tierChangeTarget.customer.id,
-      tierChangeTarget.newTier,
-      tierChangeSecurityKey.trim()
-    );
-
-    if (!res.success) {
+      soundEngine.playRedeemCelebration();
+      confetti({ particleCount: 70, spread: 60 });
+      const meta = getTierMeta(tierChangeTarget.newTier);
+      toast.success(
+        `¡Rango de ${tierChangeTarget.customer.full_name} actualizado a ${meta.label} con éxito!`
+      );
+      setTierChangeTarget(null);
+      await fetchRemoteData(true, false);
+    } catch (err: unknown) {
       soundEngine.playFraudAlert();
-      toast.error(res.error || 'Contraseña de seguridad maestra incorrecta');
-      return;
+      toast.error(err instanceof Error ? err.message : 'Error al cambiar rango');
+    } finally {
+      setIsUpdatingTier(false);
     }
-
-    soundEngine.playRedeemCelebration();
-    confetti({ particleCount: 70, spread: 60 });
-    const meta = getTierMeta(tierChangeTarget.newTier);
-    toast.success(
-      `¡Rango de ${tierChangeTarget.customer.full_name} actualizado a ${meta.label} con éxito!`
-    );
-    setTierChangeTarget(null);
-    setTierChangeSecurityKey('');
   };
 
-  // 8. SEGURIDAD: CAMBIAR CONTRASEÑA MAESTRA EXIGIENDO AdminMaster2026@
-  const handleChangeAdminPasswordWithMasterKey = (e: React.FormEvent) => {
+  // 8. SEGURIDAD: ACTUALIZAR CONTRASEÑA DSB DE OPERADOR AUTORIZADO VÍA SERVIDOR
+  const handleChangeAdminPassword = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!securityKeyInput.trim()) {
-      toast.error('Debes ingresar la contraseña de seguridad maestra');
+    const targetId = targetSecurityEmployeeId || session.userId || employees[0]?.id;
+    if (!targetId) {
+      toast.error('No hay un operador seleccionado para actualizar');
       return;
     }
-    if (!newAdminPasswordInput.trim() || newAdminPasswordInput.trim().length < 4) {
-      toast.error('La nueva contraseña debe tener al menos 4 caracteres');
+    if (!newAdminPasswordInput.trim() || newAdminPasswordInput.trim().length < 6) {
+      toast.error('La nueva contraseña DSB debe tener al menos 6 caracteres');
       return;
     }
 
-    const res = sessionManager.setAdminPasswordWithSecurityKey(
-      securityKeyInput.trim(),
-      newAdminPasswordInput.trim()
-    );
+    try {
+      const res = await fetch('/api/v1/admin/employees', {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify({
+          employeeId: targetId,
+          dsbPassword: newAdminPasswordInput.trim(),
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        throw new Error(data.message || data.error || 'No se pudo actualizar la contraseña');
+      }
 
-    if (!res.success) {
+      soundEngine.playScanSuccess();
+      toast.success('¡Contraseña DSB actualizada y cifrada con bcrypt correctamente!');
+      setNewAdminPasswordInput('');
+      await fetchRemoteData(true, false);
+    } catch (err: unknown) {
       soundEngine.playFraudAlert();
-      toast.error(res.error || 'Contraseña de seguridad maestra incorrecta');
-      return;
+      toast.error(err instanceof Error ? err.message : 'Error al actualizar contraseña');
     }
-
-    soundEngine.playScanSuccess();
-    toast.success('¡Contraseña de Administrador actualizada correctamente!');
-    setSecurityKeyInput('');
-    setNewAdminPasswordInput('');
   };
 
   // 9. GUARDAR PARÁMETROS OPERATIVOS (COOLDOWN Y GEOCERCA)
-  const handleSaveOperationalSecurity = () => {
+  const handleSaveOperationalSecurity = async () => {
     try {
-      store.updateMerchantSettings({
-        cooldown_hours: Number(cooldownHoursInput),
-        scanner_geofence_meters: Number(geofenceMetersInput),
+      const res = await fetch('/api/v1/merchant/settings', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify({
+          cooldown_hours: Number(cooldownHoursInput),
+          scanner_geofence_meters: Number(geofenceMetersInput),
+        }),
       });
+      const data = await res.json();
+      if (!res.ok) {
+        throw new Error(data.message || data.error || 'Error al guardar parámetros');
+      }
       soundEngine.playScanSuccess();
-      toast.success('Parámetros de cooldown y geocerca actualizados.');
+      toast.success('Parámetros de cooldown y geocerca actualizados en Supabase.');
+      await fetchRemoteData(true, true);
     } catch (err: unknown) {
-      toast.error(err instanceof Error ? err.message : 'Error');
+      soundEngine.playFraudAlert();
+      toast.error(err instanceof Error ? err.message : 'Error al guardar parámetros');
     }
   };
 
   // 10. GESTIÓN DE EMPLEADOS: PIN + CONTRASEÑA DSB
-  const handleAddNewEmployee = (e: React.FormEvent) => {
+  const handleAddNewEmployee = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!newEmpName.trim()) {
-      toast.error('Ingresa el nombre del empleado');
+    if (!newEmpName.trim() || newEmpName.trim().length < 2) {
+      toast.error('Ingresa el nombre del empleado (mínimo 2 caracteres)');
       return;
     }
     if (!/^\d{4}$/.test(newEmpPin.trim())) {
       toast.error('El PIN debe tener exactamente 4 dígitos numéricos');
       return;
     }
-    if (!newEmpDsbPassword.trim() || newEmpDsbPassword.trim().length < 4) {
-      toast.error('La contraseña para ingreso al DSB debe tener al menos 4 caracteres');
+    if (!newEmpDsbPassword.trim() || newEmpDsbPassword.trim().length < 6) {
+      toast.error('La contraseña para ingreso al DSB debe tener al menos 6 caracteres');
       return;
     }
 
     try {
-      store.addEmployee({
-        merchant_id: store.merchant.id,
-        location_id: store.locations[0]?.id || null,
-        name: newEmpName.trim(),
-        pin_hash: newEmpPin.trim(),
-        dsb_password: newEmpDsbPassword.trim(),
-        role: newEmpRole,
-        is_active: true,
+      const res = await fetch('/api/v1/admin/employees', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify({
+          name: newEmpName.trim(),
+          pin: newEmpPin.trim(),
+          dsbPassword: newEmpDsbPassword.trim(),
+          role: newEmpRole,
+        }),
       });
+      const data = await res.json();
+      if (!res.ok) {
+        throw new Error(data.message || data.error || 'Error al añadir empleado');
+      }
       soundEngine.playScanSuccess();
-      toast.success(`Empleado "${newEmpName}" añadido con PIN y contraseña DSB.`);
+      toast.success(`Empleado "${newEmpName}" añadido con PIN y clave DSB cifrados.`);
       setNewEmpName('');
       setNewEmpPin('');
       setNewEmpDsbPassword('');
       setIsAddingEmp(false);
+      await fetchRemoteData(true, false);
     } catch (err: unknown) {
+      soundEngine.playFraudAlert();
       toast.error(err instanceof Error ? err.message : 'Error al añadir empleado');
     }
   };
 
-  const handleUpdateEmployeePin = (empId: string, newPin: string) => {
+  const handleUpdateEmployeePin = async (empId: string, newPin: string) => {
+    if (!/^\d{4}$/.test(newPin)) {
+      toast.error('El nuevo PIN debe tener exactamente 4 dígitos numéricos');
+      return;
+    }
     try {
-      store.updateEmployee(empId, { pin_hash: newPin });
+      const res = await fetch('/api/v1/admin/employees', {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify({
+          employeeId: empId,
+          pin: newPin,
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        throw new Error(data.message || data.error || 'Error al actualizar PIN');
+      }
       soundEngine.playScanSuccess();
       toast.success('PIN de empleado actualizado.');
+      await fetchRemoteData(true, false);
     } catch (err: unknown) {
+      soundEngine.playFraudAlert();
       toast.error(err instanceof Error ? err.message : 'Error al actualizar PIN');
     }
   };
 
-  const handleDeleteEmployee = (empId: string) => {
+  const handleDeleteEmployee = async (empId: string) => {
     try {
-      store.deleteEmployee(empId);
+      const res = await fetch('/api/v1/admin/employees', {
+        method: 'DELETE',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify({ employeeId: empId }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        throw new Error(data.message || data.error || 'No se pudo desactivar el empleado');
+      }
       soundEngine.playFraudAlert();
-      toast.info('Empleado eliminado del sistema.');
+      toast.info('Empleado desactivado/eliminado del sistema.');
+      await fetchRemoteData(true, false);
     } catch (err: unknown) {
-      toast.error(err instanceof Error ? err.message : 'Error');
+      toast.error(err instanceof Error ? err.message : 'Error al eliminar empleado');
     }
   };
 
@@ -973,7 +1060,7 @@ export function UnifiedDashboard() {
       const tier = c.loyalty_tier || calculateCustomerTier(rewardsRedeemed, tierConfig);
       return tier === tierFilter;
     });
-  }, [customers, tierFilter, passes, tierConfig]);
+  }, [deduplicatedCustomers, tierFilter, passes, tierConfig]);
 
   // Filtrado de clientes para la sección de Notificaciones Push
   const searchedPushCustomers = useMemo(() => {
@@ -988,25 +1075,78 @@ export function UnifiedDashboard() {
 
   return (
     <div className="min-h-screen bg-background flex flex-col md:flex-row text-left">
+      {/* Barra Superior Móvil (< 768px) */}
+      <header className="md:hidden sticky top-0 z-30 flex items-center justify-between px-4 py-3 bg-surface-200 border-b border-white/[0.08]">
+        <div className="flex items-center gap-2.5">
+          <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-brand-500 to-purple-800 flex items-center justify-center shadow-glow-purple border border-brand-400/40">
+            <Sparkles className="w-4 h-4 text-champagne" />
+          </div>
+          <div>
+            <span className="text-sm font-bold text-white tracking-tight flex items-center gap-1.5">
+              Fidelizia <span className="text-brand-400 font-mono text-xs">DSB</span>
+            </span>
+            <span className="text-[10px] text-zinc-400 font-mono block truncate max-w-[170px]">
+              {merchant.name || 'Comercio'}
+            </span>
+          </div>
+        </div>
+        <button
+          type="button"
+          onClick={() => setIsMobileNavOpen(true)}
+          aria-label="Abrir menú de navegación"
+          className="p-2 rounded-lg bg-surface-100 border border-white/10 text-zinc-300 hover:text-white"
+        >
+          <Menu className="w-5 h-5" />
+        </button>
+      </header>
+
+      {/* Backdrop móvil para cerrar drawer */}
+      {isMobileNavOpen && (
+        <div
+          className="fixed inset-0 z-40 bg-black/70 backdrop-blur-sm md:hidden"
+          onClick={() => setIsMobileNavOpen(false)}
+          aria-hidden="true"
+        />
+      )}
+
       {/* ============================================================== */}
-      {/* BARRA LATERAL TÁCTICA IZQUIERDA (4 PESTAÑAS CANÓNICAS LIMPIAS) */}
+      {/* BARRA LATERAL TÁCTICA IZQUIERDA (RESPONSIVE DRAWER EN MÓVIL)   */}
       {/* ============================================================== */}
-      <aside className="w-full md:w-64 bg-surface-200 border-r border-white/[0.08] flex flex-col justify-between shrink-0 p-4 md:sticky md:top-0 md:h-screen">
+      <aside
+        className={cn(
+          'bg-surface-200 border-r border-white/[0.08] flex-col justify-between shrink-0 p-4 overflow-y-auto custom-scrollbar transition-transform',
+          isMobileNavOpen
+            ? 'fixed inset-y-0 left-0 z-50 w-72 flex shadow-2xl'
+            : 'hidden md:flex md:w-64 md:sticky md:top-0 md:h-screen'
+        )}
+      >
         <div className="space-y-6">
           {/* Header Marca */}
-          <div className="flex items-center gap-3 px-2">
-            <div className="w-9 h-9 rounded-lg bg-gradient-to-br from-brand-500 to-purple-800 flex items-center justify-center shadow-glow-purple border border-brand-400/40">
-              <Sparkles className="w-5 h-5 text-champagne" />
+          <div className="flex items-center justify-between gap-2 px-2">
+            <div className="flex items-center gap-3 min-w-0">
+              <div className="w-9 h-9 rounded-lg bg-gradient-to-br from-brand-500 to-purple-800 flex items-center justify-center shadow-glow-purple border border-brand-400/40 shrink-0">
+                <Sparkles className="w-5 h-5 text-champagne" />
+              </div>
+              <div className="min-w-0">
+                <span className="text-sm font-bold text-white tracking-tight flex items-center gap-1.5">
+                  Fidelizia <span className="text-brand-400 font-mono text-xs">DSB</span>
+                </span>
+                <span className="text-[10px] text-zinc-400 font-mono block truncate">
+                  {merchant.name || 'Comercio'}
+                </span>
+              </div>
             </div>
-            <div>
-              <span className="text-sm font-bold text-white tracking-tight flex items-center gap-1.5">
-                DYNAMIND <span className="text-brand-400 font-mono text-xs">DSB</span>
-              </span>
-              <span className="text-[10px] text-zinc-400 font-mono block">Café Canelo & Roasters</span>
-            </div>
+            <button
+              type="button"
+              onClick={() => setIsMobileNavOpen(false)}
+              aria-label="Cerrar menú de navegación"
+              className="md:hidden p-1.5 rounded-lg text-zinc-400 hover:text-white hover:bg-white/5"
+            >
+              <X className="w-4 h-4" />
+            </button>
           </div>
 
-          {/* Tarjeta de Operador en Turno & Switch de Rol */}
+          {/* Tarjeta de Operador en Turno & Switch de Vista (Solo Admin/Manager autenticado) */}
           <div className="bg-surface-100 p-3 rounded-xl border border-white/5 space-y-2.5">
             <div className="flex items-center justify-between">
               <span className="text-[10px] font-mono uppercase text-zinc-500">Operador en Turno</span>
@@ -1016,30 +1156,31 @@ export function UnifiedDashboard() {
             </div>
             <p className="text-xs font-semibold text-white truncate">{session.operatorName}</p>
 
-            {/* Selector Rápido de Rol */}
-            <div className="grid grid-cols-2 gap-1 bg-black/40 p-1 rounded-md border border-white/5 text-[10px] font-mono">
-              <button
-                type="button"
-                onClick={() => handleToggleRole('admin')}
-                className={`py-1 rounded text-center transition-colors ${
-                  isAdmin ? 'bg-purple-600 text-white font-bold' : 'text-zinc-400 hover:text-white'
-                }`}
-              >
-                👑 Admin
-              </button>
-              <button
-                type="button"
-                onClick={() => handleToggleRole('staff')}
-                className={`py-1 rounded text-center transition-colors ${
-                  !isAdmin ? 'bg-amber-600 text-white font-bold' : 'text-zinc-400 hover:text-white'
-                }`}
-              >
-                👤 Staff
-              </button>
-            </div>
+            {(session.serverRole === 'admin' || session.serverRole === 'manager') && (
+              <div className="grid grid-cols-2 gap-1 bg-black/40 p-1 rounded-md border border-white/5 text-[10px] font-mono">
+                <button
+                  type="button"
+                  onClick={() => handleToggleRole('admin')}
+                  className={`py-1 rounded text-center transition-colors ${
+                    isAdmin ? 'bg-purple-600 text-white font-bold' : 'text-zinc-400 hover:text-white'
+                  }`}
+                >
+                  👑 Admin
+                </button>
+                <button
+                  type="button"
+                  onClick={() => handleToggleRole('staff')}
+                  className={`py-1 rounded text-center transition-colors ${
+                    !isAdmin ? 'bg-amber-600 text-white font-bold' : 'text-zinc-400 hover:text-white'
+                  }`}
+                >
+                  👤 Staff
+                </button>
+              </div>
+            )}
           </div>
 
-          {/* Menú de Navegación Lateral (Solo 4 Pestañas Canónicas Limpias) */}
+          {/* Menú de Navegación Lateral */}
           <nav className="space-y-1 text-xs font-mono">
             <span className="text-[10px] font-mono uppercase text-zinc-500 px-2 block mb-1">
               Centro de Mando
@@ -1047,7 +1188,7 @@ export function UnifiedDashboard() {
 
             {/* 1. Tablero Operativo */}
             <button
-              onClick={() => setActiveTab('overview')}
+              onClick={() => { setActiveTab('overview'); setIsMobileNavOpen(false); }}
               className={`w-full flex items-center gap-2.5 px-3 py-2 rounded-md transition-colors ${
                 activeTab === 'overview'
                   ? 'bg-brand-500/20 text-white font-bold border border-brand-400/30 shadow-sm'
@@ -1060,7 +1201,7 @@ export function UnifiedDashboard() {
 
             {/* 2. Clientes & Fidelidad */}
             <button
-              onClick={() => setActiveTab('customers')}
+              onClick={() => { setActiveTab('customers'); setIsMobileNavOpen(false); }}
               className={`w-full flex items-center gap-2.5 px-3 py-2 rounded-md transition-colors ${
                 activeTab === 'customers'
                   ? 'bg-brand-500/20 text-white font-bold border border-brand-400/30'
@@ -1071,9 +1212,9 @@ export function UnifiedDashboard() {
               <span>Clientes & Fidelidad</span>
             </button>
 
-            {/* 3. Notificaciones Push a Wallets (2x1, Doble Sello, Cortesías) */}
+            {/* 3. Notificaciones Push a Wallets */}
             <button
-              onClick={() => setActiveTab('notifications')}
+              onClick={() => { setActiveTab('notifications'); setIsMobileNavOpen(false); }}
               className={`w-full flex items-center justify-between px-3 py-2 rounded-md transition-colors ${
                 activeTab === 'notifications'
                   ? 'bg-brand-500/20 text-white font-bold border border-brand-400/30 shadow-sm'
@@ -1091,7 +1232,7 @@ export function UnifiedDashboard() {
 
             {/* 4. Agenda de Reservas & Calendario */}
             <button
-              onClick={() => setActiveTab('bookings')}
+              onClick={() => { setActiveTab('bookings'); setIsMobileNavOpen(false); }}
               className={`w-full flex items-center gap-2.5 px-3 py-2 rounded-md transition-colors ${
                 activeTab === 'bookings'
                   ? 'bg-brand-500/20 text-white font-bold border border-brand-400/30'
@@ -1102,9 +1243,9 @@ export function UnifiedDashboard() {
               <span>Agenda de Reservas</span>
             </button>
 
-            {/* 4. Ajustes & Personalización (Con Diseñador 3D y Seguridad) */}
+            {/* 5. Ajustes & Personalización */}
             <button
-              onClick={() => setActiveTab('settings')}
+              onClick={() => { setActiveTab('settings'); setIsMobileNavOpen(false); }}
               className={`w-full flex items-center justify-between px-3 py-2 rounded-md transition-colors ${
                 activeTab === 'settings'
                   ? 'bg-brand-500/20 text-white font-bold border border-brand-400/30'
@@ -1129,12 +1270,12 @@ export function UnifiedDashboard() {
             <LogOut className="w-4 h-4" />
             <span>Cerrar Sesión</span>
           </button>
-          <a
+          <Link
             href="/"
             className="block text-center text-[10px] text-zinc-500 hover:text-zinc-300 transition-colors font-mono"
           >
             ← Salir al Sitio Web
-          </a>
+          </Link>
         </div>
       </aside>
 
@@ -1160,12 +1301,12 @@ export function UnifiedDashboard() {
               </div>
 
               <div className="flex gap-2">
-                <a href="/#/scan" className="text-xs">
+                <Link href={`/scanner/${merchant.slug || 'cafe-canelo'}`} className="text-xs">
                   <Button variant="primary" size="sm" className="shadow-glow-purple">
                     <QrCode className="w-3.5 h-3.5 mr-1" />
-                    Abrir Escáner POS (/#/scan)
+                    Abrir Escáner POS
                   </Button>
-                </a>
+                </Link>
               </div>
             </div>
 
@@ -1174,7 +1315,7 @@ export function UnifiedDashboard() {
               <Card>
                 <CardHeader className="pb-2">
                   <span className="text-[11px] font-mono text-zinc-400 uppercase">Clientes Registrados</span>
-                  <CardTitle className="text-2xl font-mono text-white mt-1">{customers.length}</CardTitle>
+                  <CardTitle className="text-2xl font-mono text-white mt-1">{deduplicatedCustomers.length}</CardTitle>
                 </CardHeader>
                 <CardContent className="text-[10px] text-zinc-500 font-mono">
                   {champions.length} VIPs · {loyal.length} Leales
@@ -1247,10 +1388,21 @@ export function UnifiedDashboard() {
                         <Button
                           variant="secondary"
                           size="sm"
-                          onClick={() => {
-                            store.resolveFraudAlert(fa.id);
-                            soundEngine.playScanSuccess();
-                            toast.success('Alerta resuelta.');
+                          onClick={async () => {
+                            try {
+                              const res = await fetch('/api/v1/admin/fraud-alerts', {
+                                method: 'PATCH',
+                                headers: { 'Content-Type': 'application/json' },
+                                credentials: 'include',
+                                body: JSON.stringify({ alertId: fa.id }),
+                              });
+                              if (!res.ok) throw new Error('Error al resolver alerta');
+                              soundEngine.playScanSuccess();
+                              toast.success('Alerta resuelta en Supabase.');
+                              await fetchRemoteData(true, false);
+                            } catch {
+                              toast.error('No se pudo resolver la alerta.');
+                            }
                           }}
                           className="text-[10px] h-6 px-2"
                         >
@@ -1443,7 +1595,7 @@ export function UnifiedDashboard() {
                     : 'bg-surface-100 text-zinc-400 border-white/10 hover:text-white'
                 }`}
               >
-                Todos ({customers.length})
+                Todos ({deduplicatedCustomers.length})
               </button>
 
               {/* Bronce */}
@@ -1560,7 +1712,7 @@ export function UnifiedDashboard() {
 
                             {/* Sellos de Tarjeta */}
                             <td className="py-3 px-4 text-zinc-300">
-                              {pass ? `${pass.current_stamps}/${store.merchant.stamps_needed}` : '0'}
+                              {pass ? `${pass.current_stamps}/${merchant.stamps_needed}` : '0'}
                             </td>
 
                             {/* Beneficio VIP Asignado */}
@@ -1612,8 +1764,10 @@ export function UnifiedDashboard() {
             {/* MODAL 1: REGISTRO DE CLIENTE IN-SITU (VENTANA EMERGENTE SIN SALIR DEL DSB) */}
             {isRegisterCustomerOpen && (
               <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-md animate-in fade-in">
-                <div className="w-full max-w-md bg-surface-200 border border-purple-500/30 rounded-xl p-5 text-left shadow-2xl relative">
+                <div className="w-full max-w-md max-h-[90vh] overflow-y-auto custom-scrollbar bg-surface-200 border border-purple-500/30 rounded-xl p-5 text-left shadow-2xl relative">
                   <button
+                    type="button"
+                    aria-label="Cerrar modal de registro"
                     onClick={() => setIsRegisterCustomerOpen(false)}
                     className="absolute top-4 right-4 text-zinc-400 hover:text-white"
                   >
@@ -1728,8 +1882,10 @@ export function UnifiedDashboard() {
 
               return (
                 <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-md animate-in fade-in">
-                  <div className="w-full max-w-lg bg-surface-200 border border-purple-500/30 rounded-xl p-5 text-left shadow-2xl relative">
+                  <div className="w-full max-w-lg max-h-[90vh] overflow-y-auto custom-scrollbar bg-surface-200 border border-purple-500/30 rounded-xl p-5 text-left shadow-2xl relative">
                     <button
+                      type="button"
+                      aria-label="Cerrar modal de beneficios"
                       onClick={() => setEditingCustomer(null)}
                       className="absolute top-4 right-4 text-zinc-400 hover:text-white"
                     >
@@ -1882,8 +2038,10 @@ export function UnifiedDashboard() {
             {/* MODAL 3: SELECTOR DE OFERTA PUSH PARA CLIENTES EN RIESGO */}
             {isPushOfferModalOpen && (
               <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-md animate-in fade-in">
-                <div className="w-full max-w-md bg-surface-200 border border-rose-500/30 rounded-xl p-5 text-left shadow-2xl relative">
+                <div className="w-full max-w-md max-h-[90vh] overflow-y-auto custom-scrollbar bg-surface-200 border border-rose-500/30 rounded-xl p-5 text-left shadow-2xl relative">
                   <button
+                    type="button"
+                    aria-label="Cerrar modal de oferta push"
                     onClick={() => setIsPushOfferModalOpen(false)}
                     className="absolute top-4 right-4 text-zinc-400 hover:text-white"
                   >
@@ -2137,7 +2295,7 @@ export function UnifiedDashboard() {
                                     </span>
                                     <div className="flex items-center gap-1 text-[9px] text-zinc-400 font-mono">
                                       <span className="w-1.5 h-1.5 rounded-full bg-emerald-400"></span>
-                                      <span>{pass ? `${pass.current_stamps}/${store.merchant.stamps_needed} sellos` : 'Pase activo'}</span>
+                                      <span>{pass ? `${pass.current_stamps}/${merchant.stamps_needed} sellos` : 'Pase activo'}</span>
                                     </div>
                                   </div>
                                 </div>
@@ -2246,7 +2404,7 @@ export function UnifiedDashboard() {
                               return `Segmento (${pushSelectedSegment === 'all' ? 'Todos' : pushSelectedSegment})`;
                             }
                             const activeCust = deduplicatedCustomers.find((c) => c.id === (selectedPushCustomerId || deduplicatedCustomers[0]?.id));
-                            const activePass = activeCust ? (passes.find((p) => p.customer_id === activeCust.id) || store.passes.find((p) => p.customer_id === activeCust.id)) : null;
+                            const activePass = activeCust ? passes.find((p) => p.customer_id === activeCust.id) : null;
                             return activeCust
                               ? `${activeCust.full_name} (${activePass?.pass_serial_number || 'Google Wallet'})`
                               : 'Selecciona un cliente';
@@ -2353,7 +2511,7 @@ export function UnifiedDashboard() {
                                   </svg>
                                 </div>
                                 <span className="text-[11px] font-bold text-zinc-300 font-sans">
-                                  Google Wallet · Café Canelo
+                                  Google Wallet · {merchant.name || 'Comercio'}
                                 </span>
                               </div>
                               <span className="text-[9px] text-zinc-500 font-mono">Ahora</span>
@@ -2480,7 +2638,7 @@ export function UnifiedDashboard() {
                 </p>
               </div>
               <div className="flex items-center gap-2">
-                <Link href="/booking/cafe-canelo" target="_blank">
+                <Link href={`/booking/${merchant.slug || 'cafe-canelo'}`} target="_blank">
                   <Button variant="primary" size="sm" className="shadow-glow-purple">
                     <Plus className="w-3.5 h-3.5 mr-1" />
                     Nueva Reserva en Mostrador
@@ -2507,16 +2665,18 @@ export function UnifiedDashboard() {
             </Badge>
             <h3 className="text-xl font-bold text-white">Acceso Restringido para Perfil Staff</h3>
             <p className="text-xs text-zinc-400 mt-2 mb-6 leading-relaxed">
-              La sección de Ajustes, Diseñador de Tarjeta y Gestión de PINs está reservada para el <strong>Admin Master</strong>.
+              La sección de Ajustes, Diseñador de Tarjeta y Gestión de PINs está reservada para el <strong>Admin Master</strong> o <strong>Gerente</strong>.
             </p>
-            <Button
-              variant="tactical"
-              size="md"
-              onClick={() => handleToggleRole('admin')}
-              className="gap-2"
-            >
-              <span>Conmutar a 👑 Admin Master (Prueba Rápida)</span>
-            </Button>
+            {(session.serverRole === 'admin' || session.serverRole === 'manager') && (
+              <Button
+                variant="tactical"
+                size="md"
+                onClick={() => handleToggleRole('admin')}
+                className="gap-2"
+              >
+                <span>Volver a Vista Admin</span>
+              </Button>
+            )}
           </div>
         )}
 
@@ -3117,7 +3277,7 @@ export function UnifiedDashboard() {
                     )}
 
                     <LivePassPreview
-                      merchantName={store.merchant.name}
+                      merchantName={merchant.name}
                       customerName="Carlos Mendoza"
                       passSerialNumber="PASS-CANELO-001"
                       currentStamps={stampsNeededInput - 2}
@@ -3299,7 +3459,7 @@ export function UnifiedDashboard() {
                   </CardContent>
                 </Card>
 
-                {/* 2. Directorio de Clientes con Cambio Manual de Rango (Protegido con AdminMaster2026@) */}
+                {/* 2. Directorio de Clientes con Cambio Manual de Rango */}
                 <Card>
                   <CardHeader>
                     <div className="flex items-center justify-between">
@@ -3309,11 +3469,11 @@ export function UnifiedDashboard() {
                           <span>Gestión Manual de Rango por Cliente</span>
                         </CardTitle>
                         <CardDescription className="text-xs">
-                          Puedes ascender o ajustar el rango de cualquier cliente de forma discrecional. Por seguridad, la acción exige ingresar la contraseña de seguridad maestra (<code>AdminMaster2026@</code>).
+                          Puedes ascender o ajustar el rango de cualquier cliente de forma discrecional desde tu sesión administrativa.
                         </CardDescription>
                       </div>
                       <Badge variant="tactical">
-                        {customers.length} miembros registrados
+                        {deduplicatedCustomers.length} miembros registrados
                       </Badge>
                     </div>
                   </CardHeader>
@@ -3325,11 +3485,11 @@ export function UnifiedDashboard() {
                           <th className="py-3 px-4">Teléfono</th>
                           <th className="py-3 px-4">Bonos Redimidos</th>
                           <th className="py-3 px-4">Rango Actual</th>
-                          <th className="py-3 px-4 text-right">Modificar Rango (Clave Maestra)</th>
+                          <th className="py-3 px-4 text-right">Modificar Rango</th>
                         </tr>
                       </thead>
                       <tbody className="divide-y divide-white/5">
-                        {customers.map((c) => {
+                        {deduplicatedCustomers.map((c) => {
                           const pass = passes.find((p) => p.customer_id === c.id);
                           const rewardsRedeemed = pass?.total_rewards_redeemed || 0;
                           const currentTier = c.loyalty_tier || calculateCustomerTier(rewardsRedeemed, tierConfig);
@@ -3371,7 +3531,6 @@ export function UnifiedDashboard() {
                                         disabled={isCurrent}
                                         onClick={() => {
                                           setTierChangeTarget({ customer: c, newTier: tierKey });
-                                          setTierChangeSecurityKey('');
                                         }}
                                         className={`px-2 py-1 rounded text-[10px] font-bold uppercase transition-all ${
                                           isCurrent
@@ -3394,13 +3553,15 @@ export function UnifiedDashboard() {
                   </CardContent>
                 </Card>
 
-                {/* MODAL DE SEGURIDAD: CAMBIO MANUAL DE RANGO (EXIGE AdminMaster2026@) */}
+                {/* MODAL DE CONFIRMACIÓN: CAMBIO MANUAL DE RANGO */}
                 {tierChangeTarget && (() => {
                   const newMeta = getTierMeta(tierChangeTarget.newTier);
                   return (
                     <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-md animate-in fade-in">
-                      <div className="w-full max-w-md bg-surface-200 border border-purple-500/40 rounded-xl p-5 text-left shadow-2xl relative">
+                      <div className="w-full max-w-md max-h-[90vh] overflow-y-auto custom-scrollbar bg-surface-200 border border-purple-500/40 rounded-xl p-5 text-left shadow-2xl relative">
                         <button
+                          type="button"
+                          aria-label="Cerrar modal de cambio de rango"
                           onClick={() => setTierChangeTarget(null)}
                           className="absolute top-4 right-4 text-zinc-400 hover:text-white"
                         >
@@ -3412,7 +3573,7 @@ export function UnifiedDashboard() {
                             <Crown className="w-5 h-5 text-champagne" />
                           </div>
                           <div>
-                            <h3 className="text-sm font-bold text-white">Autorización Maestra de Rango</h3>
+                            <h3 className="text-sm font-bold text-white">Confirmación de Cambio de Rango</h3>
                             <p className="text-[11px] text-zinc-400">
                               Modificando rango de <strong>{tierChangeTarget.customer.full_name}</strong> a{' '}
                               <span className="text-purple-300 font-bold">{newMeta.label}</span>
@@ -3420,32 +3581,14 @@ export function UnifiedDashboard() {
                           </div>
                         </div>
 
-                        <form onSubmit={handleConfirmTierChangeWithMasterKey} className="space-y-4 text-xs font-mono">
+                        <form onSubmit={handleConfirmTierChange} className="space-y-4 text-xs font-mono">
                           <div className="p-3 bg-purple-950/20 rounded-lg border border-purple-500/20 text-zinc-300 space-y-1">
                             <span className="text-[10px] text-purple-300 font-bold block uppercase tracking-wider">
-                              Confirmación de Seguridad Requerida
+                              Autorizado por Sesión Administrativa
                             </span>
                             <p className="text-[11px] text-zinc-400 leading-relaxed">
                               Esta acción ascenderá o ajustará el nivel del miembro en su Apple & Google Wallet y actualizará sus beneficios en el POS.
                             </p>
-                          </div>
-
-                          <div>
-                            <label className="text-zinc-300 block mb-1 font-bold">
-                              Contraseña de Seguridad Maestra *
-                            </label>
-                            <input
-                              type="password"
-                              required
-                              autoFocus
-                              value={tierChangeSecurityKey}
-                              onChange={(e) => setTierChangeSecurityKey(e.target.value)}
-                              placeholder="Ingresa AdminMaster2026@"
-                              className="w-full bg-surface-100 border border-white/10 rounded-lg px-3 py-2 text-white font-mono text-xs focus:border-purple-500 focus:outline-none"
-                            />
-                            <span className="text-[10px] text-zinc-500 mt-1 block">
-                              Por norma de auditoría: <code>AdminMaster2026@</code>
-                            </span>
                           </div>
 
                           <div className="pt-2 flex gap-2">
@@ -3462,9 +3605,10 @@ export function UnifiedDashboard() {
                               type="submit"
                               variant="primary"
                               size="md"
+                              disabled={isUpdatingTier}
                               className="flex-1 font-bold shadow-glow-purple"
                             >
-                              Confirmar & Cambiar
+                              {isUpdatingTier ? 'Actualizando...' : 'Confirmar & Cambiar'}
                             </Button>
                           </div>
                         </form>
@@ -3489,7 +3633,7 @@ export function UnifiedDashboard() {
                           <span>Personal Autorizado, PINs & Contraseñas DSB</span>
                         </CardTitle>
                         <CardDescription className="text-xs">
-                          Cada operador tiene su PIN de 4 dígitos para el escáner POS (/#/scan) y su contraseña para ingresar al DSB.
+                          Cada operador tiene su PIN de 4 dígitos para el escáner POS (/scanner/{merchant.slug || 'cafe-canelo'}) y su contraseña cifrada para ingresar al DSB.
                         </CardDescription>
                       </div>
                       <Button
@@ -3545,9 +3689,10 @@ export function UnifiedDashboard() {
                           <div>
                             <label className="text-[10px] text-zinc-400 block mb-1">Contraseña DSB</label>
                             <input
-                              type="text"
+                              type="password"
                               required
-                              placeholder="Mínimo 4 caracteres"
+                              minLength={6}
+                              placeholder="Mínimo 6 caracteres"
                               value={newEmpDsbPassword}
                               onChange={(e) => setNewEmpDsbPassword(e.target.value)}
                               className="w-full bg-black/60 border border-white/10 rounded px-2.5 py-1.5 text-white font-mono"
@@ -3570,27 +3715,34 @@ export function UnifiedDashboard() {
                             <div className="flex items-center gap-2">
                               <span className="font-bold text-white font-sans">{emp.name}</span>
                               <Badge variant={emp.role === 'manager' || emp.role === 'admin' ? 'tactical' : 'default'}>
-                                {emp.role === 'manager' || emp.role === 'admin' ? 'Gerente' : 'Cajero'}
+                                {emp.role === 'admin' ? 'Admin' : emp.role === 'manager' ? 'Gerente' : 'Cajero'}
+                              </Badge>
+                              <Badge variant={emp.is_active ? 'success' : 'danger'}>
+                                {emp.is_active ? 'Activo' : 'Inactivo'}
                               </Badge>
                             </div>
                             <span className="text-[10px] text-zinc-500 block mt-0.5">
-                              ID: {emp.id} · Clave DSB: <code>{emp.dsb_password || 'staff123'}</code>
+                              {emp.username ? `@${emp.username} · ` : ''}Credenciales protegidas (bcrypt)
                             </span>
                           </div>
 
                           <div className="flex items-center gap-2">
                             <div className="flex items-center gap-1 bg-black/60 px-2.5 py-1 rounded border border-white/10">
-                              <span className="text-[10px] text-zinc-400">PIN POS:</span>
+                              <span className="text-[10px] text-zinc-400">Nuevo PIN:</span>
                               <input
-                                type="text"
+                                type="password"
+                                inputMode="numeric"
                                 maxLength={4}
-                                defaultValue={emp.pin_hash}
+                                placeholder="••••"
+                                aria-label={`Nuevo PIN POS para ${emp.name}`}
                                 onBlur={(e) => {
-                                  if (e.target.value !== emp.pin_hash && e.target.value.length === 4) {
-                                    handleUpdateEmployeePin(emp.id, e.target.value);
+                                  const val = e.target.value.trim();
+                                  if (/^\d{4}$/.test(val)) {
+                                    void handleUpdateEmployeePin(emp.id, val);
+                                    e.target.value = '';
                                   }
                                 }}
-                                className="w-12 bg-transparent text-center font-mono font-bold text-champagne focus:outline-none"
+                                className="w-14 bg-transparent text-center font-mono font-bold text-champagne focus:outline-none placeholder:text-zinc-600"
                               />
                             </div>
 
@@ -3616,45 +3768,49 @@ export function UnifiedDashboard() {
             {/* ============================================================== */}
             {settingsSubTab === 'security' && (
               <div className="grid grid-cols-1 md:grid-cols-2 gap-6 animate-in fade-in">
-                {/* Cambio de Contraseña Maestra Admin */}
+                {/* Cambio de Contraseña DSB de Operador Autorizado */}
                 <Card className="border-purple-500/30">
                   <CardHeader>
                     <CardTitle className="text-base flex items-center gap-2">
                       <KeyRound className="w-4 h-4 text-purple-400" />
-                      <span>Cambiar Contraseña Maestra de Admin</span>
+                      <span>Rotar Contraseña DSB de Operador</span>
                     </CardTitle>
                     <CardDescription className="text-xs">
-                      Requiere ingresar obligatoriamente la <strong>Contraseña de Seguridad Maestra</strong> (<code>AdminMaster2026@</code>) para autorizar el cambio.
+                      Actualiza la contraseña cifrada con bcrypt para el operador seleccionado en Supabase.
                     </CardDescription>
                   </CardHeader>
                   <CardContent>
-                    <form onSubmit={handleChangeAdminPasswordWithMasterKey} className="space-y-3 text-xs font-mono">
+                    <form onSubmit={handleChangeAdminPassword} className="space-y-3 text-xs font-mono">
                       <div>
-                        <label className="text-zinc-300 block mb-1">Contraseña de Seguridad Maestra *</label>
-                        <input
-                          type="password"
-                          required
-                          value={securityKeyInput}
-                          onChange={(e) => setSecurityKeyInput(e.target.value)}
-                          placeholder="Ingresa AdminMaster2026@"
+                        <label className="text-zinc-300 block mb-1">Operador *</label>
+                        <select
+                          value={targetSecurityEmployeeId || session.userId || employees[0]?.id || ''}
+                          onChange={(e) => setTargetSecurityEmployeeId(e.target.value)}
                           className="w-full bg-surface-100 border border-white/10 rounded-lg px-3 py-2 text-white font-mono"
-                        />
+                        >
+                          {employees.map((emp) => (
+                            <option key={emp.id} value={emp.id}>
+                              {emp.name} ({emp.role})
+                            </option>
+                          ))}
+                        </select>
                       </div>
 
                       <div>
-                        <label className="text-zinc-300 block mb-1">Nueva Contraseña de Admin *</label>
+                        <label className="text-zinc-300 block mb-1">Nueva Contraseña DSB *</label>
                         <input
-                          type="text"
+                          type="password"
                           required
+                          minLength={6}
                           value={newAdminPasswordInput}
                           onChange={(e) => setNewAdminPasswordInput(e.target.value)}
-                          placeholder="Mínimo 4 caracteres"
+                          placeholder="Mínimo 6 caracteres"
                           className="w-full bg-surface-100 border border-white/10 rounded-lg px-3 py-2 text-white font-mono"
                         />
                       </div>
 
                       <Button type="submit" variant="primary" size="md" className="w-full font-bold shadow-glow-purple">
-                        Validar Seguridad & Actualizar Contraseña
+                        Actualizar Contraseña Cifrada
                       </Button>
                     </form>
                   </CardContent>

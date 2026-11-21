@@ -9,7 +9,6 @@ import {
   Cookie, 
   Percent, 
   Star,
-  Award,
   CupSoda
 } from 'lucide-react';
 import { RewardMilestone } from '@/types/domain';
@@ -48,7 +47,9 @@ export function StampsVisualizer({
   brandColor = '#8b5cf6',
   milestones = [],
 }: StampsVisualizerProps) {
-  const stamps = Array.from({ length: totalNeeded }, (_, i) => i + 1);
+  const safeTotal = Math.max(1, totalNeeded);
+  const safeCurrent = Math.max(0, currentStamps);
+  const stamps = Array.from({ length: safeTotal }, (_, i) => i + 1);
 
   return (
     <div className="w-full text-left">
@@ -58,15 +59,15 @@ export function StampsVisualizer({
           <span>PROGRESO DE LEALTAD</span>
         </span>
         <span className="text-white font-bold bg-black/40 px-2 py-0.5 rounded border border-white/10 font-mono">
-          {currentStamps} / {totalNeeded} SELLOS
+          {safeCurrent} / {safeTotal} SELLOS
         </span>
       </div>
 
       <div className="grid grid-cols-5 gap-2 sm:gap-2.5">
         {stamps.map((stampNum) => {
-          const isStamped = stampNum <= currentStamps;
-          const isNext = stampNum === currentStamps + 1;
-          const isGoal = stampNum === totalNeeded;
+          const isStamped = stampNum <= safeCurrent;
+          const isNext = stampNum === safeCurrent + 1;
+          const isGoal = stampNum === safeTotal;
           const milestone = milestones.find((m) => m.stamp_number === stampNum);
 
           return (
@@ -182,18 +183,18 @@ export function StampsVisualizer({
       {/* Barra Milimétrica de Progreso con Micro-Detalle */}
       <div className="mt-2.5 pt-2 border-t border-white/[0.06]">
         <div className="flex items-center justify-between text-[8px] font-mono text-zinc-400 mb-1">
-          <span>{Math.round((currentStamps / totalNeeded) * 100)}% COMPLETADO</span>
+          <span>{Math.min(100, Math.round((safeCurrent / safeTotal) * 100))}% COMPLETADO</span>
           <span className="text-zinc-300 font-bold">
-            {currentStamps >= totalNeeded 
+            {safeCurrent >= safeTotal 
               ? '🎉 ¡PREMIO DISPONIBLE!' 
-              : `Faltan ${totalNeeded - currentStamps} para reclamar`}
+              : `Faltan ${Math.max(0, safeTotal - safeCurrent)} para reclamar`}
           </span>
         </div>
         <div className="w-full h-1 bg-black/60 rounded-full overflow-hidden border border-white/5">
           <div 
             className="h-full rounded-full transition-all duration-500 shadow-sm"
             style={{ 
-              width: `${Math.min(100, (currentStamps / totalNeeded) * 100)}%`,
+              width: `${Math.min(100, (safeCurrent / safeTotal) * 100)}%`,
               backgroundColor: brandColor 
             }}
           />

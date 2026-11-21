@@ -78,8 +78,8 @@ export function getTierMeta(tier: LoyaltyTier) {
   }
 }
 
-// Semilla inicial canónica para pruebas locales y producción
-const INITIAL_MERCHANT: Merchant = {
+// Semilla inicial canónica para pruebas locales y estado inicial de UI
+export const INITIAL_MERCHANT: Merchant = {
   id: '00000000-0000-0000-0000-000000000001',
   user_id: 'user-dynamind-001',
   name: 'Café Canelo & Specialty Roasters',
@@ -735,8 +735,9 @@ export class FideliziaStore {
     merchantId: string;
     passSerialNumber: string;
     managerPin: string;
-    stampsToDeduct: number;
+    stampsToDeduct?: number;
   }) {
+    const stampsToDeduct = params.stampsToDeduct ?? this.merchant.stamps_needed;
     const manager = this.employees.find(
       (e) => e.pin_hash === params.managerPin && (e.role === 'manager' || e.role === 'admin') && e.is_active
     );
@@ -747,12 +748,12 @@ export class FideliziaStore {
     const pass = this.passes.find((p) => p.pass_serial_number === params.passSerialNumber);
     if (!pass) throw new Error('Tarjeta no encontrada');
 
-    if (pass.current_stamps < params.stampsToDeduct) {
-      throw new Error(`Sellos insuficientes. Se requieren ${params.stampsToDeduct} sellos para este canje.`);
+    if (pass.current_stamps < stampsToDeduct) {
+      throw new Error(`Sellos insuficientes. Se requieren ${stampsToDeduct} sellos para este canje.`);
     }
 
     const customer = this.customers.find((c) => c.id === pass.customer_id);
-    const newStamps = pass.current_stamps - params.stampsToDeduct;
+    const newStamps = pass.current_stamps - stampsToDeduct;
 
     this.passes
       .filter((p) => p.customer_id === pass.customer_id)
@@ -767,7 +768,7 @@ export class FideliziaStore {
       customer_id: pass.customer_id,
       employee_id: manager.id,
       pass_id: pass.id,
-      stamps_deducted: params.stampsToDeduct,
+      stamps_deducted: stampsToDeduct,
       reward_name: this.merchant.reward_description,
       authorized_by_manager_id: manager.id,
       redeemed_at: new Date().toISOString(),
@@ -932,7 +933,7 @@ export class FideliziaStore {
     return this.merchant.tier_config;
   }
 
-  // 8.1. CAMBIO MANUAL DE RANGO DE CLIENTE (PROTEGIDO POR AdminMaster2026@)
+  // 8.1. CAMBIO MANUAL DE RANGO DE CLIENTE
   public updateCustomerTierManually(
     customerId: string,
     newTier: LoyaltyTier,
@@ -1006,7 +1007,7 @@ export class FideliziaStore {
     }
     const emp: Employee = {
       ...newEmp,
-      dsb_password: newEmp.dsb_password?.trim() || 'staff123',
+      dsb_password: newEmp.dsb_password?.trim() || '',
       id: `emp-${Date.now()}`,
       created_at: new Date().toISOString(),
     };

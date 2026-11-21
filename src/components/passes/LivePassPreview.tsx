@@ -18,6 +18,7 @@ import {
   CheckCircle2
 } from 'lucide-react';
 import { StampsVisualizer } from './StampsVisualizer';
+import { RealQrCode } from './RealQrCode';
 import { 
   LoyaltyTier, 
   CardPattern, 
@@ -54,52 +55,8 @@ export interface LivePassPreviewProps {
   className?: string;
 }
 
-// Generador de matriz de QR en SVG nativo sin dependencias externas
 function SvgQrCode({ value, size = 130 }: { value: string; size?: number }) {
-  const hash = value.split('').reduce((acc, char) => acc + char.charCodeAt(0), 0);
-  const grid = 21;
-  const cells: boolean[][] = [];
-
-  for (let r = 0; r < grid; r++) {
-    cells[r] = [];
-    for (let c = 0; c < grid; c++) {
-      const isTopLeft = r < 7 && c < 7;
-      const isTopRight = r < 7 && c >= grid - 7;
-      const isBottomLeft = r >= grid - 7 && c < 7;
-
-      if (isTopLeft || isTopRight || isBottomLeft) {
-        const localR = isTopLeft ? r : isTopRight ? r : r - (grid - 7);
-        const localC = isTopLeft ? c : isTopRight ? c - (grid - 7) : c;
-        const isBorder = localR === 0 || localR === 6 || localC === 0 || localC === 6;
-        const isCenter = localR >= 2 && localR <= 4 && localC >= 2 && localC <= 4;
-        cells[r][c] = isBorder || isCenter;
-      } else {
-        const bit = ((hash * (r + 1) * (c + 1) * 31) % 100) > 48;
-        cells[r][c] = bit;
-      }
-    }
-  }
-
-  const cellSize = size / grid;
-
-  return (
-    <svg width={size} height={size} viewBox={`0 0 ${size} ${size}`} className="bg-white p-2 rounded-lg shadow-md">
-      {cells.map((row, r) =>
-        row.map((active, c) =>
-          active ? (
-            <rect
-              key={`${r}-${c}`}
-              x={c * cellSize}
-              y={r * cellSize}
-              width={cellSize}
-              height={cellSize}
-              fill="#09090b"
-            />
-          ) : null
-        )
-      )}
-    </svg>
-  );
+  return <RealQrCode value={value} size={size} />;
 }
 
 // Micro-Chip EMV Virtual con Acabado Adaptado al Rango y Micro-Líneas Láser
@@ -274,7 +231,12 @@ function CardPatternBackground({
 
     case 'grid_matrix':
       return (
-        <svg className="absolute inset-0 w-full h-full pointer-events-none opacity-25" xmlns="http://www.w3.org/2000/svg">
+        <svg
+          className="absolute inset-0 w-full h-full pointer-events-none opacity-25"
+          viewBox="0 0 360 500"
+          preserveAspectRatio="none"
+          xmlns="http://www.w3.org/2000/svg"
+        >
           <defs>
             <pattern id="cardGrid" width="16" height="16" patternUnits="userSpaceOnUse">
               <path d="M 16 0 L 0 0 0 16" fill="none" stroke={color} strokeWidth="0.6" strokeDasharray="1,3" />
@@ -284,9 +246,9 @@ function CardPatternBackground({
           <rect width="100%" height="100%" fill="url(#cardGrid)" />
           {/* Miras tácticas angulares en las esquinas */}
           <path d="M 8 16 L 8 8 L 16 8" fill="none" stroke={color} strokeWidth="1" />
-          <path d="M 334 16 L 334 8 L 326 8" fill="none" stroke={color} strokeWidth="1" />
-          <path d="M 8 460 L 8 468 L 16 468" fill="none" stroke={color} strokeWidth="1" />
-          <path d="M 334 460 L 334 468 L 326 468" fill="none" stroke={color} strokeWidth="1" />
+          <path d="M 352 16 L 352 8 L 344 8" fill="none" stroke={color} strokeWidth="1" />
+          <path d="M 8 484 L 8 492 L 16 492" fill="none" stroke={color} strokeWidth="1" />
+          <path d="M 352 484 L 352 492 L 344 492" fill="none" stroke={color} strokeWidth="1" />
         </svg>
       );
 
@@ -762,9 +724,9 @@ export function LivePassPreview({
           {/* ============================================================== */}
           {/* REVERSO DE LA TARJETA: BANDA MAGNÉTICA, POLÍTICAS Y DATOS */}
           {/* ============================================================== */}
-          <div
+            <div
             className={cn(
-              'w-full [backface-visibility:hidden] [transform:rotateY(180deg)] p-5 border absolute inset-0 overflow-hidden shadow-2xl flex flex-col justify-between',
+              'w-full [backface-visibility:hidden] [transform:rotateY(180deg)] p-5 border absolute inset-0 overflow-y-auto custom-scrollbar shadow-2xl flex flex-col justify-between',
               morphClasses.container,
               !isSingleCard ? tierVisuals.cardBg : '',
               !isSingleCard ? tierVisuals.cardBorder : 'border-white/15',

@@ -1,125 +1,194 @@
-// src/app/api/v1/pos/scan-visit/route.ts
 import { NextRequest, NextResponse } from 'next/server';
+import { applyRateLimit } from '@/lib/api/rate-limit';
+import { parseJsonBody } from '@/lib/api/validation';
+import { verifyPin } from '@/lib/auth/password';
+import {
+  employeeRepo,
+  fraudAlertRepo,
+  passRepo,
+  PosRpcError,
+  transactionRepo,
+} from '@/lib/repositories';
+import { getSupabaseAdmin } from '@/lib/supabase/server';
+import { triggerApplePassUpdate } from '@/lib/wallet/apple-wallet-service';
+import { syncGooglePassStamps } from '@/lib/wallet/google-wallet-service';
 import { ScanVisitSchema } from '@/types/domain';
-import { fideliziaStore } from '@/lib/store/fidelizia-store';
-import { updateGooglePassStamps } from '@/lib/wallet/google-wallet-service';
-import { sendApplePushNotification } from '@/lib/wallet/apple-wallet-service';
+
+export const runtime = 'nodejs';
 
 export async function POST(req: NextRequest) {
+  const rateLimit = applyRateLimit(req, 'pos:scan-visit', {
+    limit: 60,
+    windowMs: 60_000,
+  });
+  if (!rateLimit.allowed) {
+    return rateLimit.response;
+  }
+
+  const parsed = await parseJsonBody(req, ScanVisitSchema);
+  if (!parsed.success) {
+    return parsed.response;
+  }
+
+  const {
+    merchantId,
+    employeePin,
+    passSerialNumber,
+    ticketNumber,
+    amount,
+    locationId,
+    stampsToAward,
+    scannerCoordinates,
+  } = parsed.data;
+
   try {
-    const body = await req.json();
+    const supabase = getSupabaseAdmin();
+    const candidates = await employeeRepo.listActiveAuthCandidates(supabase, merchantId);
 
-    // Soporte tanto para ScanVisitSchema (POS completo) como para payload { pass_serial_number, stamps_to_add }
-    let serial = body.pass_serial_number || body.passSerialNumber;
-    let result: {
-      pass: { id: string; pass_type: string; pass_serial_number: string; current_stamps: number; push_token?: string | null };
-      rewardUnlocked: boolean;
-      customer?: { full_name: string };
-      transaction?: unknown;
-    };
-
-    if (body.merchantId && body.employeePin) {
-      const validated = ScanVisitSchema.safeParse(body);
-      if (!validated.success) {
-        return NextResponse.json(
-          {
-            error: 'BAD_REQUEST',
-            details: validated.error.flatten().fieldErrors,
-          },
-          { status: 400 }
-        );
+    let matchedEmployee = null;
+    for (const emp of candidates) {
+      if (await verifyPin(employeePin, emp.pin_hash)) {
+        matchedEmployee = emp;
+        break;
       }
-      serial = validated.data.passSerialNumber;
-      const processResult = fideliziaStore.processScanVisit({
-        merchantId: validated.data.merchantId,
-        employeePin: validated.data.employeePin,
-        passSerialNumber: validated.data.passSerialNumber,
-        ticketNumber: validated.data.ticketNumber,
-        amount: validated.data.amount,
-        scannerLat: validated.data.scannerCoordinates?.latitude,
-        scannerLng: validated.data.scannerCoordinates?.longitude,
-      });
-
-      const passRecord = await fideliziaStore.getPassWithCustomerBySerial(serial);
-      result = {
-        pass: passRecord?.pass || {
-          id: 'pass-001',
-          pass_type: 'google',
-          pass_serial_number: serial,
-          current_stamps: processResult.stampsCurrent,
-        },
-        rewardUnlocked: processResult.rewardReady,
-        customer: { full_name: processResult.customerName },
-        transaction: processResult,
-      };
-    } else {
-      if (!serial) {
-        return NextResponse.json(
-          { error: 'El serial del pase es obligatorio' },
-          { status: 400 }
-        );
-      }
-      const record = await fideliziaStore.getPassWithCustomerBySerial(serial);
-      if (!record || record.pass.status !== 'active') {
-        return NextResponse.json(
-          { error: 'Pase no encontrado o suspendido' },
-          { status: 404 }
-        );
-      }
-      const merchant = fideliziaStore.merchant;
-      const stampsNeeded = merchant.stamps_needed || 8;
-      const updatedStamps = Math.min(stampsNeeded, record.pass.current_stamps + (body.stamps_to_add || 1));
-      const updatedPass = await fideliziaStore.updatePassStamps(record.pass.id, updatedStamps);
-      result = {
-        pass: updatedPass,
-        rewardUnlocked: updatedStamps >= stampsNeeded,
-        customer: record.customer,
-      };
     }
 
-    // Disparar sincronización con Google Wallet y Apple Wallet en paralelo
-    const pass = result.pass;
-    const record = await fideliziaStore.getPassWithCustomerBySerial(serial);
-    const customer = record?.customer;
-    const merchant = fideliziaStore.merchant;
-    const stampsNeeded = merchant.stamps_needed || 8;
-    const customerName = customer?.full_name || 'Miembro';
-    const rewardDescription = customer?.custom_reward || merchant.reward_description || 'Premio de Autor';
-
-    const notificationMessage = result.rewardUnlocked
-      ? `🎉 ¡FELICIDADES ${customerName.toUpperCase()}! Has completado tus ${stampsNeeded} sellos en ${merchant.name}. Tu premio "${rewardDescription}" está LISTO para reclamar en caja.`
-      : `☕ ¡Sumaste un sello en ${merchant.name}! Llevas ${pass.current_stamps}/${stampsNeeded} sellos.`;
-
-    const walletSyncTasks: Promise<unknown>[] = [];
-
-    if (pass.pass_type === 'google') {
-      walletSyncTasks.push(
-        updateGooglePassStamps(
-          pass.pass_serial_number,
-          pass.current_stamps,
-          notificationMessage
-        )
+    if (!matchedEmployee) {
+      const pinRateLimit = applyRateLimit(req, 'pos:scan-visit:bad-pin', {
+        limit: 10,
+        windowMs: 60_000,
+        keySuffix: merchantId,
+      });
+      if (!pinRateLimit.allowed) {
+        return pinRateLimit.response;
+      }
+      return NextResponse.json(
+        { error: 'INVALID_EMPLOYEE_PIN', message: 'PIN de operador inválido o inactivo' },
+        { status: 401, headers: rateLimit.headers }
       );
     }
 
-    if (pass.pass_type === 'apple' && pass.push_token) {
-      walletSyncTasks.push(sendApplePushNotification(pass.push_token));
+    let scanResult;
+    try {
+      scanResult = await transactionRepo.processPosScan(supabase, {
+        merchantId,
+        employeeId: matchedEmployee.id,
+        passSerialNumber,
+        ticketNumber,
+        amount,
+        scannerLat: scannerCoordinates?.latitude ?? null,
+        scannerLng: scannerCoordinates?.longitude ?? null,
+        locationId: locationId ?? null,
+        stampsToAdd: stampsToAward,
+      });
+    } catch (rpcErr: unknown) {
+      if (rpcErr instanceof PosRpcError) {
+        if (rpcErr.fraudAlertType) {
+          try {
+            const targetPass = await passRepo.getBySerial(supabase, passSerialNumber, merchantId);
+            await fraudAlertRepo.create(supabase, {
+              merchantId,
+              employeeId: matchedEmployee.id,
+              customerId: targetPass?.customer_id ?? null,
+              alertType: rpcErr.fraudAlertType,
+              severity: rpcErr.fraudAlertType === 'geofence_breach' ? 'high' : 'medium',
+              details: {
+                passSerialNumber,
+                ticketNumber,
+                amount,
+                message: rpcErr.message,
+              },
+            });
+          } catch (alertErr) {
+            console.error('[POS Scan FraudAlert Insert Error]:', alertErr);
+          }
+        }
+
+        return NextResponse.json(
+          { error: rpcErr.code, message: rpcErr.message },
+          { status: rpcErr.statusCode, headers: rateLimit.headers }
+        );
+      }
+      throw rpcErr;
     }
 
-    // Ejecutar tareas sin bloquear respuesta en caja
-    Promise.allSettled(walletSyncTasks).catch((err) =>
-      console.error('[Wallet Push Notification Error]:', err)
+    const bundle = await passRepo.getWithCustomerAndMerchantBySerial(
+      supabase,
+      scanResult.pass_serial_number,
+      merchantId
     );
 
-    return NextResponse.json(result, { status: 200 });
-  } catch (err: unknown) {
-    const message = err instanceof Error ? err.message : 'Error interno al procesar escaneo';
+    const walletSync: {
+      google?: { attempted: boolean; success: boolean; error?: string };
+      apple?: { attempted: boolean; success: boolean; sentCount: number; errors?: string[] };
+    } = {};
+
+    const syncTasks: Promise<void>[] = [];
+
+    if (bundle) {
+      if (bundle.pass.pass_type === 'google') {
+        syncTasks.push(
+          syncGooglePassStamps(bundle.pass, bundle.merchant, {
+            customer: bundle.customer,
+            notify: true,
+          }).then((res) => {
+            walletSync.google = {
+              attempted: true,
+              success: res.success,
+              error: res.error,
+            };
+          })
+        );
+      } else if (bundle.pass.pass_type === 'apple') {
+        syncTasks.push(
+          triggerApplePassUpdate(supabase, merchantId, bundle.pass).then((res) => {
+            walletSync.apple = {
+              attempted: true,
+              success: res.success,
+              sentCount: res.sentCount,
+              errors: res.errors.length > 0 ? res.errors : undefined,
+            };
+          })
+        );
+      }
+    }
+
+    if (syncTasks.length > 0) {
+      await Promise.allSettled(syncTasks);
+    }
+
     return NextResponse.json(
       {
-        error: 'FRAUD_OR_SECURITY_BLOCK',
-        message,
+        success: true,
+        transaction: scanResult,
+        pass: bundle
+          ? {
+              id: bundle.pass.id,
+              pass_serial_number: bundle.pass.pass_serial_number,
+              pass_type: bundle.pass.pass_type,
+              current_stamps: bundle.pass.current_stamps,
+              total_visits: bundle.pass.total_visits,
+              status: bundle.pass.status,
+            }
+          : {
+              id: scanResult.pass_id,
+              pass_serial_number: scanResult.pass_serial_number,
+              pass_type: scanResult.pass_type,
+              current_stamps: scanResult.stamps_current,
+            },
+        customer: {
+          id: scanResult.customer_id,
+          full_name: scanResult.customer_name,
+          loyalty_tier: scanResult.loyalty_tier,
+          custom_reward: scanResult.custom_reward,
+        },
+        rewardUnlocked: scanResult.reward_ready,
+        walletSync,
       },
-      { status: 422 }
+      { status: 200, headers: rateLimit.headers }
     );
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : 'Error interno al procesar escaneo';
+    return NextResponse.json({ error: 'POS_SCAN_ERROR', message }, { status: 500 });
   }
 }

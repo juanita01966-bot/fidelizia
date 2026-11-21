@@ -1,175 +1,175 @@
-// src/app/api/v1/customers/register/route.ts
+import crypto from 'node:crypto';
 import { NextRequest, NextResponse } from 'next/server';
-import { fideliziaStore } from '@/lib/store/fidelizia-store';
-import { supabaseAdmin } from '@/lib/supabase/server';
+import { applyRateLimit, extractClientIp } from '@/lib/api/rate-limit';
+import { parseJsonBody } from '@/lib/api/validation';
+import { customerRepo, merchantRepo, passRepo, referralRepo } from '@/lib/repositories';
+import { getSupabaseAdmin } from '@/lib/supabase/server';
+import { CustomerRegisterSchema } from '@/types/domain';
+import { REFERRAL_COOKIE_NAME } from '@/types/referrals';
+
+export const runtime = 'nodejs';
+
+function generateSerialNumber(merchantSlug: string): string {
+  const prefix = merchantSlug
+    .replace(/[^a-zA-Z0-9]/g, '')
+    .toUpperCase()
+    .slice(0, 6) || 'FIDZ';
+  const rand = crypto.randomBytes(4).toString('hex').toUpperCase();
+  return `PASS-${prefix}-${rand}`;
+}
+
+function isUniqueViolation(err: unknown): boolean {
+  const msg = err instanceof Error ? err.message : String(err);
+  return msg.includes('23505') || /duplicate key|unique constraint/i.test(msg);
+}
 
 export async function POST(req: NextRequest) {
+  const rateLimit = applyRateLimit(req, 'customers:register', {
+    limit: 20,
+    windowMs: 60_000,
+  });
+  if (!rateLimit.allowed) {
+    return rateLimit.response;
+  }
+
+  const parsed = await parseJsonBody(req, CustomerRegisterSchema);
+  if (!parsed.success) {
+    return parsed.response;
+  }
+
+  const {
+    fullName,
+    phone,
+    birthdate,
+    passType,
+    merchantSlug,
+    serialNumber,
+    referralCode: bodyReferralCode,
+  } = parsed.data;
+  const targetSlug = (merchantSlug || 'cafe-canelo').trim().toLowerCase();
+
   try {
-    const body = await req.json();
-    const { fullName, phone, birthdate, passType = 'google', serialNumber } = body;
-
-    if (!fullName || fullName.trim().length < 3) {
+    const supabase = getSupabaseAdmin();
+    const merchant = await merchantRepo.getBySlug(supabase, targetSlug);
+    if (!merchant) {
       return NextResponse.json(
-        { error: 'El nombre completo es requerido' },
-        { status: 400 }
+        { error: 'MERCHANT_NOT_FOUND', message: 'Comercio no encontrado o inactivo' },
+        { status: 404, headers: rateLimit.headers }
       );
     }
 
-    if (!phone || phone.trim().length < 7) {
-      return NextResponse.json(
-        { error: 'Un número de teléfono válido es requerido' },
-        { status: 400 }
-      );
-    }
+    const existingCustomer = await customerRepo.findByPhone(supabase, merchant.id, phone);
+    let customer = existingCustomer;
+    let isNewCustomer = false;
 
-    const cleanPhone = phone.trim();
-    const cleanName = fullName.trim();
-    const selectedPassType = passType === 'apple' ? 'apple' : 'google';
-    const cleanSerial = typeof serialNumber === 'string' && serialNumber.trim() ? serialNumber.trim() : undefined;
-
-    // 1. Registrar en el store central en memoria del servidor
-    const localResult = fideliziaStore.registerCustomer({
-      fullName: cleanName,
-      phone: cleanPhone,
-      birthdate: birthdate || null,
-      passType: selectedPassType,
-      serialNumber: cleanSerial,
-    });
-
-    // 2. Persistir en Supabase de forma resiliente
-    let customerRecord = localResult.customer;
-    let passRecord = localResult.pass;
-
-    try {
-      // Obtener o usar el ID del comercio (Café Canelo)
-      const { data: merchantData } = (await supabaseAdmin
-        .from('merchants')
-        .select('id')
-        .eq('slug', 'cafe-canelo')
-        .maybeSingle()) as { data: any };
-
-      const merchantId = (merchantData?.id as string) || '00000000-0000-0000-0000-000000000001';
-
-      // Verificar si el cliente ya existe por teléfono
-      const { data: existingCustomer } = (await supabaseAdmin
-        .from('customers')
-        .select('*')
-        .eq('merchant_id', merchantId)
-        .eq('phone', cleanPhone)
-        .maybeSingle()) as { data: any };
-
-      let dbCustomerId: string;
-
-      if (existingCustomer) {
-        dbCustomerId = existingCustomer.id;
-        customerRecord = {
-          ...customerRecord,
-          id: existingCustomer.id,
-          full_name: existingCustomer.full_name,
-          phone: existingCustomer.phone,
-          rfm_segment: existingCustomer.rfm_segment as any,
-          created_at: existingCustomer.created_at,
-        };
-      } else {
-        const { data: newCustomer, error: insertCustErr } = await supabaseAdmin
-          .from('customers')
-          .insert({
-            merchant_id: merchantId,
-            phone: cleanPhone,
-            full_name: cleanName,
-            birthdate: birthdate || null,
-            rfm_segment: 'new',
-            terms_accepted_at: new Date().toISOString(),
-          })
-          .select()
-          .single();
-
-        if (insertCustErr) {
-          console.warn('[Supabase Register Customer Error]:', insertCustErr);
-          dbCustomerId = localResult.customer.id;
-        } else if (newCustomer) {
-          const cust = newCustomer as any;
-          dbCustomerId = cust.id;
-          customerRecord = {
-            ...customerRecord,
-            id: cust.id,
-            full_name: cust.full_name,
-            phone: cust.phone,
-            rfm_segment: cust.rfm_segment as any,
-            created_at: cust.created_at,
-          };
-        } else {
-          dbCustomerId = localResult.customer.id;
+    if (!customer) {
+      try {
+        customer = await customerRepo.create(supabase, merchant.id, {
+          fullName,
+          phone,
+          birthdate: birthdate ?? null,
+          termsAcceptedAt: new Date().toISOString(),
+        });
+        isNewCustomer = true;
+      } catch (createErr) {
+        if (isUniqueViolation(createErr)) {
+          customer = await customerRepo.findByPhone(supabase, merchant.id, phone);
+          isNewCustomer = false;
+        }
+        if (!customer) {
+          throw createErr;
         }
       }
+    }
 
-      // Verificar o crear el pase de lealtad en Supabase
-      const { data: existingPassData } = await supabaseAdmin
-        .from('wallet_passes')
-        .select('*')
-        .eq('customer_id', dbCustomerId)
-        .eq('pass_type', selectedPassType)
-        .maybeSingle();
+    const effectiveReferralCode =
+      bodyReferralCode?.trim() || req.cookies.get(REFERRAL_COOKIE_NAME)?.value?.trim() || null;
 
-      const existingPass = existingPassData as any;
-
-      if (existingPass) {
-        passRecord = {
-          ...passRecord,
-          id: existingPass.id,
-          customer_id: existingPass.customer_id,
-          pass_serial_number: existingPass.pass_serial_number,
-          current_stamps: existingPass.current_stamps,
-          status: existingPass.status as any,
-        };
-      } else {
-        const serialToUse = localResult.pass.pass_serial_number;
-        const { data: newPassData, error: insertPassErr } = await supabaseAdmin
-          .from('wallet_passes')
-          .insert({
-            customer_id: dbCustomerId,
-            merchant_id: merchantId,
-            pass_type: selectedPassType,
-            pass_serial_number: serialToUse,
-            authentication_token: `auth-${serialToUse}`,
-            current_stamps: 1, // Sello de bienvenida
-            total_visits: 1,
-            total_rewards_redeemed: 0,
-            status: 'active',
-          })
-          .select()
-          .single();
-
-        const newPass = newPassData as any;
-        if (insertPassErr) {
-          console.warn('[Supabase Register Pass Error]:', insertPassErr);
-        } else if (newPass) {
-          passRecord = {
-            ...passRecord,
-            id: newPass.id,
-            customer_id: newPass.customer_id,
-            pass_serial_number: newPass.pass_serial_number,
-            current_stamps: newPass.current_stamps,
-            status: newPass.status as any,
+    let referralAttribution: { attributed: boolean; promoterCode?: string } | null = null;
+    if (isNewCustomer && effectiveReferralCode) {
+      try {
+        const attrResult = await referralRepo.attributeNewCustomer(supabase, {
+          merchantId: merchant.id,
+          customerId: customer.id,
+          customerPhone: customer.phone,
+          referralCode: effectiveReferralCode,
+          ip: extractClientIp(req),
+          userAgent: req.headers.get('user-agent'),
+        });
+        if (attrResult.attributed) {
+          referralAttribution = {
+            attributed: true,
+            promoterCode: attrResult.promoterCode,
           };
         }
+      } catch (refErr: unknown) {
+        const refMsg = refErr instanceof Error ? refErr.message : String(refErr);
+        console.error('[Customer Register Referral Attribution Error]:', refMsg);
       }
-
-      console.log(`[Customer Registered in Supabase & Central]: ${customerRecord.full_name} · Serial: ${passRecord.pass_serial_number}`);
-    } catch (dbErr) {
-      console.warn('[Customer Register DB Exception]:', dbErr);
     }
+
+    let pass = await passRepo.getByCustomerAndType(supabase, merchant.id, customer.id, passType);
+    if (!pass) {
+      const requestedSerial = serialNumber?.trim();
+      const serialToUse = requestedSerial || generateSerialNumber(merchant.slug);
+      const authenticationToken = crypto.randomBytes(24).toString('hex');
+
+      try {
+        pass = await passRepo.create(supabase, {
+          merchantId: merchant.id,
+          customerId: customer.id,
+          passType,
+          serialNumber: serialToUse,
+          authenticationToken,
+          initialStamps: 1,
+          initialVisits: 1,
+        });
+      } catch (passErr) {
+        if (isUniqueViolation(passErr)) {
+          pass = await passRepo.getByCustomerAndType(supabase, merchant.id, customer.id, passType);
+          if (!pass && !requestedSerial) {
+            pass = await passRepo.create(supabase, {
+              merchantId: merchant.id,
+              customerId: customer.id,
+              passType,
+              serialNumber: generateSerialNumber(merchant.slug),
+              authenticationToken: crypto.randomBytes(24).toString('hex'),
+              initialStamps: 1,
+              initialVisits: 1,
+            });
+          }
+        }
+        if (!pass) {
+          throw passErr;
+        }
+      }
+    }
+
+    const { authentication_token: _omittedAuth, ...safePass } = pass;
 
     return NextResponse.json(
       {
         success: true,
-        customer: customerRecord,
-        pass: passRecord,
+        isNewCustomer,
+        referral: referralAttribution,
+        customer,
+        pass: safePass,
+        merchant: {
+          id: merchant.id,
+          name: merchant.name,
+          slug: merchant.slug,
+          stamps_needed: merchant.stamps_needed,
+          reward_description: merchant.reward_description,
+        },
       },
-      { status: 201 }
+      { status: 201, headers: rateLimit.headers }
     );
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : 'Error al registrar cliente';
-    return NextResponse.json({ error: message }, { status: 500 });
+    console.error('[Customer Register Error]:', message);
+    return NextResponse.json(
+      { error: 'REGISTER_FAILED', message: 'No fue posible completar el registro' },
+      { status: 500 }
+    );
   }
 }

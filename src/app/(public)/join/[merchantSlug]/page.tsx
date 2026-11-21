@@ -1,24 +1,25 @@
 'use client';
 
 import React, { useState, useEffect } from 'react';
+import Link from 'next/link';
 import { useParams } from 'next/navigation';
-import { 
-  Sparkles, 
-  Smartphone, 
-  CheckCircle2, 
-  Gift, 
-  ShieldCheck, 
-  ArrowRight,
-  Download
+import {
+  Sparkles,
+  Smartphone,
+  CheckCircle2,
+  Gift,
+  Download,
 } from 'lucide-react';
 import { Button } from '@/components/ui/Button';
 import { LivePassPreview } from '@/components/passes/LivePassPreview';
-import { getStore } from '@/lib/store/fidelizia-store';
+import { INITIAL_MERCHANT } from '@/lib/store/fidelizia-store';
+import { saveActivePassSerial } from '@/lib/pwa/pwa-helper';
 import { soundEngine } from '@/lib/audio/sound-effects';
+import type { LoyaltyTier, Merchant } from '@/types/domain';
 import confetti from 'canvas-confetti';
 import { toast } from 'sonner';
 
-function GoogleColorIcon({ className = "w-5 h-5" }: { className?: string }) {
+function GoogleColorIcon({ className = 'w-5 h-5' }: { className?: string }) {
   return (
     <svg className={className} viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
       <path
@@ -41,164 +42,222 @@ function GoogleColorIcon({ className = "w-5 h-5" }: { className?: string }) {
   );
 }
 
+function normalizePhoneE164(raw: string): string {
+  const trimmed = raw.trim();
+  if (trimmed.startsWith('+')) {
+    return `+${trimmed.slice(1).replace(/\D/g, '')}`;
+  }
+  return `+57${trimmed.replace(/\D/g, '')}`;
+}
+
+function normalizeReferralCodeClient(raw: string | null | undefined): string | null {
+  if (!raw) return null;
+  const cleaned = raw.trim().toUpperCase();
+  return /^[A-Z0-9-]{3,24}$/.test(cleaned) ? cleaned : null;
+}
+
+function readCookieClient(name: string): string | null {
+  if (typeof document === 'undefined' || !document.cookie) return null;
+  const pairs = document.cookie.split(';');
+  for (const pair of pairs) {
+    const idx = pair.indexOf('=');
+    if (idx === -1) continue;
+    const key = pair.slice(0, idx).trim();
+    if (key === name) {
+      const val = pair.slice(idx + 1).trim();
+      try {
+        return decodeURIComponent(val);
+      } catch {
+        return val;
+      }
+    }
+  }
+  return null;
+}
+
 export default function JoinPage() {
   const params = useParams();
-  const slug = (params.merchantSlug as string) || 'cafe-canelo';
-  const store = getStore();
+  const slug =
+    typeof params?.merchantSlug === 'string' && params.merchantSlug.trim()
+      ? params.merchantSlug.trim().toLowerCase()
+      : 'cafe-canelo';
+
+  const [merchant, setMerchant] = useState<Merchant>(INITIAL_MERCHANT);
+  const [merchantNotFound, setMerchantNotFound] = useState(false);
 
   const [fullName, setFullName] = useState('');
   const [phone, setPhone] = useState('');
   const [birthdate, setBirthdate] = useState('');
   const [termsAccepted, setTermsAccepted] = useState(true);
-  const [detectedOS, setDetectedOS] = useState<'apple' | 'google'>('google');
+  const [isIosDevice, setIsIosDevice] = useState(false);
   const [selectedPassType, setSelectedPassType] = useState<'apple' | 'google'>('google');
+  const [referralCode, setReferralCode] = useState<string | null>(null);
+  const [isSubmitting, setIsSubmitting] = useState(false);
 
   const [isRegistered, setIsRegistered] = useState(false);
   const [registeredData, setRegisteredData] = useState<{
     customerName: string;
     serialNumber: string;
     currentStamps: number;
+    passType: 'apple' | 'google';
+    loyaltyTier: LoyaltyTier;
   } | null>(null);
 
-  // Billetera Oficial Configurada: Google Wallet y Sincronización de Merchant
   useEffect(() => {
-    setSelectedPassType('google');
+    const iosDetected =
+      typeof navigator !== 'undefined' &&
+      /iphone|ipad|ipod/.test(navigator.userAgent.toLowerCase());
+    setIsIosDevice(iosDetected);
+    setSelectedPassType(iosDetected ? 'apple' : 'google');
 
-    fetch('/api/v1/merchant/settings')
-      .then((res) => res.json())
-      .then((data) => {
+    // First-touch precedence: prefer existing fidz_ref cookie, fallback to ?ref= query param
+    const cookieRef = normalizeReferralCodeClient(readCookieClient('fidz_ref'));
+    const queryRef =
+      typeof window !== 'undefined'
+        ? normalizeReferralCodeClient(new URLSearchParams(window.location.search).get('ref'))
+        : null;
+    const resolvedRef = cookieRef || queryRef;
+    if (resolvedRef) {
+      setReferralCode(resolvedRef);
+    }
+
+    const controller = new AbortController();
+    fetch(`/api/v1/merchant/settings?slug=${encodeURIComponent(slug)}`, {
+      signal: controller.signal,
+      cache: 'no-store',
+    })
+      .then(async (res) => {
+        if (res.status === 404) {
+          setMerchantNotFound(true);
+          return;
+        }
+        if (!res.ok) return;
+        const data = await res.json();
         if (data?.merchant) {
-          store.updateMerchantSettings(data.merchant);
+          setMerchant(data.merchant as Merchant);
         }
       })
-      .catch((e) => console.warn('Error fetching merchant settings:', e));
-  }, []);
+      .catch(() => {
+        // Ignore abort
+      });
 
-  const handleSubmit = (e: React.FormEvent) => {
+    return () => controller.abort();
+  }, [slug]);
+
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
 
-    if (!fullName.trim() || fullName.length < 3) {
+    if (!termsAccepted) {
+      toast.error('Debes aceptar los términos y la política de tratamiento de datos para continuar');
+      return;
+    }
+
+    if (!fullName.trim() || fullName.trim().length < 3) {
       toast.error('Ingresa tu nombre completo');
       return;
     }
 
-    if (!phone.trim() || phone.length < 8) {
+    if (!phone.trim() || phone.replace(/\D/g, '').length < 7) {
       toast.error('Ingresa un número de WhatsApp válido');
       return;
     }
 
-    // Asegurar formato E.164
-    const formattedPhone = phone.startsWith('+') ? phone : `+57${phone.replace(/\D/g, '')}`;
+    const formattedPhone = normalizePhoneE164(phone);
+    setIsSubmitting(true);
 
-    const executeRegistration = async () => {
-      try {
-        // 1. Petición al backend central conectado a Supabase
-        const response = await fetch('/api/v1/customers/register', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            fullName: fullName.trim(),
-            phone: formattedPhone,
-            birthdate: birthdate || null,
-            passType: selectedPassType,
-            merchantSlug: slug,
-          }),
-        });
-
-        let customerData: any;
-        let passData: any;
-
-        if (response.ok) {
-          const resJson = await response.json();
-          customerData = resJson.customer;
-          passData = resJson.pass;
-
-          // Sincronizar en el store local preservando exactamente el ID y Serial de Supabase
-          store.syncFromRemote({
-            customers: [customerData],
-            passes: [passData],
-          });
-
-          // Notificar en tiempo real a cualquier pestaña del Dashboard abierta en el navegador
-          try {
-            const bc = new BroadcastChannel('fidelizia_realtime_sync');
-            bc.postMessage({ type: 'CUSTOMER_REGISTERED', customer: customerData, pass: passData });
-            bc.close();
-          } catch (e) {
-            // BroadcastChannel opcional
-          }
-        } else {
-          // Fallback a registro local si el endpoint falla
-          const local = store.registerCustomer({
-            fullName: fullName.trim(),
-            phone: formattedPhone,
-            birthdate: birthdate || null,
-            passType: selectedPassType,
-          });
-          customerData = local.customer;
-          passData = local.pass;
-        }
-
-        setRegisteredData({
-          customerName: customerData.full_name,
-          serialNumber: passData.pass_serial_number,
-          currentStamps: passData.current_stamps || 1,
-        });
-
-        setIsRegistered(true);
-        soundEngine.playRedeemCelebration();
-
-        // Disparo de confeti de celebración
-        confetti({
-          particleCount: 80,
-          spread: 60,
-          origin: { y: 0.6 },
-          colors: ['#8b5cf6', '#d4a373', '#10b981'],
-        });
-
-        toast.success('¡Tarjeta digital generada con éxito!', {
-          description: 'Hemos sumado tu primer sello de bienvenida.',
-        });
-      } catch (err: unknown) {
-        // Fallback resiliente
-        const local = store.registerCustomer({
+    try {
+      const response = await fetch('/api/v1/customers/register', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
           fullName: fullName.trim(),
           phone: formattedPhone,
           birthdate: birthdate || null,
           passType: selectedPassType,
-        });
+          merchantSlug: slug,
+          termsAccepted: true,
+          ...(referralCode ? { referralCode } : {}),
+        }),
+      });
 
-        setRegisteredData({
-          customerName: local.customer.full_name,
-          serialNumber: local.pass.pass_serial_number,
-          currentStamps: local.pass.current_stamps || 1,
+      const resJson = await response.json();
+      if (!response.ok || !resJson.success) {
+        toast.error('No pudimos completar tu registro', {
+          description: resJson.message || 'Verifica los campos e intenta de nuevo.',
         });
-
-        setIsRegistered(true);
-        toast.success('¡Tarjeta digital generada con éxito!');
+        return;
       }
-    };
 
-    executeRegistration();
+      const serial = resJson.pass.pass_serial_number as string;
+      saveActivePassSerial(serial);
+
+      setRegisteredData({
+        customerName: resJson.customer.full_name,
+        serialNumber: serial,
+        currentStamps: resJson.pass.current_stamps ?? 1,
+        passType: resJson.pass.pass_type === 'apple' ? 'apple' : 'google',
+        loyaltyTier: (resJson.customer.loyalty_tier as LoyaltyTier) || 'bronze',
+      });
+
+      setIsRegistered(true);
+      soundEngine.playRedeemCelebration();
+
+      confetti({
+        particleCount: 80,
+        spread: 60,
+        origin: { y: 0.6 },
+        colors: ['#8b5cf6', '#d4a373', '#10b981'],
+      });
+
+      toast.success('¡Tarjeta digital generada con éxito!', {
+        description: 'Hemos sumado tu primer sello de bienvenida.',
+      });
+    } catch {
+      toast.error('Error de conexión con el servidor');
+    } finally {
+      setIsSubmitting(false);
+    }
   };
+
+  if (merchantNotFound) {
+    return (
+      <div className="min-h-screen bg-background flex items-center justify-center p-6">
+        <div className="max-w-md w-full bg-surface-200 border border-white/10 rounded-2xl p-6 text-center space-y-3">
+          <h1 className="text-lg font-bold text-white">Comercio no encontrado</h1>
+          <p className="text-xs text-zinc-400">
+            El enlace de registro <code className="font-mono text-zinc-200">/join/{slug}</code> no corresponde a un comercio activo.
+          </p>
+          <Link href="/" className="text-xs font-mono text-champagne hover:underline inline-block pt-2">
+            Ir al inicio →
+          </Link>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="min-h-screen bg-background py-10 px-4 sm:px-6 flex flex-col justify-center items-center relative overflow-hidden">
-      {/* Luz Ambiental de Fondo */}
       <div className="absolute top-1/4 left-1/2 -translate-x-1/2 w-[600px] h-[350px] bg-brand-600/10 blur-[140px] pointer-events-none rounded-full" />
 
       <div className="w-full max-w-4xl grid grid-cols-1 md:grid-cols-2 gap-8 items-center z-10">
-        {/* COLUMNA IZQUIERDA: Formulario o Descarga */}
         <div className="text-left space-y-6">
           <div>
-            <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-purple-500/10 border border-purple-500/30 text-xs text-purple-300 font-mono mb-3">
-              <Gift className="w-3.5 h-3.5 text-champagne" />
-              Primer Sello de Bienvenida de Regalo
+            <div className="flex flex-wrap items-center gap-2 mb-3">
+              <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-purple-500/10 border border-purple-500/30 text-xs text-purple-300 font-mono">
+                <Gift className="w-3.5 h-3.5 text-champagne" />
+                Primer Sello de Bienvenida de Regalo
+              </div>
+              {referralCode && (
+                <div className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-champagne/10 border border-champagne/30 text-[11px] text-champagne font-mono">
+                  <Sparkles className="w-3 h-3 shrink-0" />
+                  <span>Invitación VIP · Código: {referralCode}</span>
+                </div>
+              )}
             </div>
             <h1 className="text-2xl sm:text-4xl font-extrabold text-white tracking-tight leading-tight">
               Únete al Club de Lealtad de{' '}
               <span className="text-transparent bg-clip-text bg-gradient-to-r from-brand-400 to-champagne-light">
-                {store.merchant.name}
+                {merchant.name}
               </span>
             </h1>
             <p className="text-sm text-zinc-400 mt-2">
@@ -207,22 +266,31 @@ export default function JoinPage() {
           </div>
 
           {!isRegistered ? (
-            <form onSubmit={handleSubmit} className="space-y-4 bg-surface-200/90 border border-white/10 rounded-xl p-6 shadow-doppelrand">
+            <form
+              onSubmit={handleSubmit}
+              className="space-y-4 bg-surface-200/90 border border-white/10 rounded-xl p-6 shadow-doppelrand"
+            >
               <div>
-                <label className="text-xs font-mono text-zinc-300 block mb-1">Nombre Completo *</label>
+                <label htmlFor="join-full-name" className="text-xs font-mono text-zinc-300 block mb-1">
+                  Nombre Completo *
+                </label>
                 <input
+                  id="join-full-name"
                   type="text"
                   required
                   value={fullName}
                   onChange={(e) => setFullName(e.target.value)}
-                  placeholder="Ej: Carlos Mendoza"
+                  placeholder="Ej: Sofía Herrera"
                   className="w-full bg-surface-100 border border-white/10 rounded px-3.5 py-2.5 text-sm text-white placeholder-zinc-500 focus:outline-none focus:border-brand-500"
                 />
               </div>
 
               <div>
-                <label className="text-xs font-mono text-zinc-300 block mb-1">WhatsApp / Móvil *</label>
+                <label htmlFor="join-phone" className="text-xs font-mono text-zinc-300 block mb-1">
+                  WhatsApp / Móvil *
+                </label>
                 <input
+                  id="join-phone"
                   type="tel"
                   required
                   value={phone}
@@ -236,16 +304,48 @@ export default function JoinPage() {
               </div>
 
               <div>
-                <label className="text-xs font-mono text-zinc-300 block mb-1">Fecha de Cumpleaños (Opcional)</label>
+                <label htmlFor="join-birthdate" className="text-xs font-mono text-zinc-300 block mb-1">
+                  Fecha de Cumpleaños (Opcional)
+                </label>
                 <input
+                  id="join-birthdate"
                   type="date"
                   value={birthdate}
                   onChange={(e) => setBirthdate(e.target.value)}
                   className="w-full bg-surface-100 border border-white/10 rounded px-3.5 py-2.5 text-sm text-white focus:outline-none focus:border-brand-500"
                 />
-                <span className="text-[10px] text-zinc-500 block mt-1">
-                  Recibe un sello de regalo y cortesía el día de tu cumpleaños.
+              </div>
+
+              <div>
+                <span className="text-xs font-mono text-zinc-300 block mb-1.5">
+                  Billetera Móvil
                 </span>
+                <div className="grid grid-cols-2 gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setSelectedPassType('google')}
+                    className={`py-2 px-3 rounded-lg border text-xs font-mono flex items-center justify-center gap-2 transition-all ${
+                      selectedPassType === 'google'
+                        ? 'bg-brand-500/20 border-brand-400 text-white font-bold'
+                        : 'bg-surface-100 border-white/10 text-zinc-400 hover:text-white'
+                    }`}
+                  >
+                    <GoogleColorIcon className="w-4 h-4" />
+                    <span>Google Wallet</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setSelectedPassType('apple')}
+                    className={`py-2 px-3 rounded-lg border text-xs font-mono flex items-center justify-center gap-2 transition-all ${
+                      selectedPassType === 'apple'
+                        ? 'bg-brand-500/20 border-brand-400 text-white font-bold'
+                        : 'bg-surface-100 border-white/10 text-zinc-400 hover:text-white'
+                    }`}
+                  >
+                    <Smartphone className="w-4 h-4 text-champagne" />
+                    <span>Apple Wallet</span>
+                  </button>
+                </div>
               </div>
 
               <div className="flex items-start gap-2 pt-1">
@@ -256,57 +356,110 @@ export default function JoinPage() {
                   onChange={(e) => setTermsAccepted(e.target.checked)}
                   className="mt-1 accent-brand-500"
                 />
-                <label htmlFor="terms" className="text-[11px] text-zinc-400">
-                  Acepto los términos del programa de lealtad y el tratamiento de mis datos personales según la Ley 1581.
+                <label htmlFor="terms" className="text-[11px] text-zinc-400 leading-relaxed">
+                  Acepto los{' '}
+                  <Link href="/terms" className="text-champagne hover:underline">
+                    términos del programa
+                  </Link>{' '}
+                  y el{' '}
+                  <Link href="/privacy" className="text-champagne hover:underline">
+                    tratamiento de mis datos personales (Ley 1581)
+                  </Link>
+                  .
                 </label>
               </div>
 
-              <Button type="submit" variant="primary" size="lg" className="w-full mt-2">
+              <Button
+                type="submit"
+                variant="primary"
+                size="lg"
+                isLoading={isSubmitting}
+                disabled={!termsAccepted || isSubmitting}
+                className="w-full mt-2"
+              >
                 <Sparkles className="w-4 h-4 mr-2 text-champagne" />
                 Crear Mi Tarjeta Digital en 10s
               </Button>
             </form>
           ) : (
-            /* Pantalla Posterior al Submit */
             <div className="space-y-4 bg-surface-200/90 border border-emerald-500/30 rounded-xl p-6 shadow-glow-purple">
               <div className="flex items-center gap-2 text-emerald-400">
                 <CheckCircle2 className="w-6 h-6 shrink-0" />
                 <h3 className="text-base font-bold text-white">¡Tarjeta Creada Exitosamente!</h3>
               </div>
               <p className="text-xs text-zinc-300">
-                Tu tarjeta ya tiene <strong>1 sello de bienvenida acumulado</strong>. Añádela a tu teléfono con un toque para recibir alertas de proximidad y no perderte ningún beneficio.
+                Tu tarjeta ya tiene <strong>1 sello de bienvenida acumulado</strong>. Añádela a tu teléfono para recibir alertas de sellos y promociones exclusivas.
               </p>
 
               <div className="pt-2 space-y-2.5">
-                <button
-                  type="button"
-                  onClick={async () => {
-                    const serial = registeredData?.serialNumber || 'PASS-CANELO-001';
-                    toast.info('Obteniendo pase oficial firmado de Google Wallet...');
-                    try {
-                      const res = await fetch('/api/v1/wallet/google/save-url', {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ serialNumber: serial }),
-                      });
-                      if (res.ok) {
-                        const data = await res.json();
-                        if (data.saveUrl) {
-                          window.open(data.saveUrl, '_blank');
-                        }
+                {(registeredData?.passType === 'apple' || isIosDevice) && (
+                  <button
+                    type="button"
+                    onClick={async () => {
+                      const serial = registeredData?.serialNumber || '';
+                      const res = await fetch(
+                        `/api/v1/wallet/apple/download?serial=${encodeURIComponent(serial)}`
+                      );
+                      if (!res.ok) {
+                        const err = (await res.json().catch(() => ({}))) as { message?: string };
+                        toast.error('Apple Wallet pendiente de certificados', {
+                          description: err.message || 'Configura los certificados Apple en el servidor.',
+                        });
+                        return;
                       }
-                    } catch (e) {
-                      console.error(e);
-                      window.open(`/api/v1/wallet/google/save-url?serial=${serial}`, '_blank');
-                    }
-                  }}
-                  className="w-full bg-white hover:bg-zinc-100 text-zinc-950 font-bold py-3.5 px-4 rounded-xl flex items-center justify-center gap-3 shadow-lg hover:shadow-xl transition-all active:scale-[0.98] border border-white/20"
-                >
-                  <GoogleColorIcon className="w-5 h-5 shrink-0" />
-                  <span className="text-sm font-semibold tracking-tight">Agregar a Google Wallet</span>
-                </button>
+                      const blob = await res.blob();
+                      const url = URL.createObjectURL(blob);
+                      const a = document.createElement('a');
+                      a.href = url;
+                      a.download = `${serial}.pkpass`;
+                      document.body.appendChild(a);
+                      a.click();
+                      a.remove();
+                      URL.revokeObjectURL(url);
+                      toast.success('Archivo .pkpass listo para Apple Wallet');
+                    }}
+                    className="w-full bg-zinc-950 hover:bg-zinc-900 text-white font-bold py-3.5 px-4 rounded-xl flex items-center justify-center gap-3 shadow-lg transition-all active:scale-[0.98] border border-white/25"
+                  >
+                    <Download className="w-5 h-5 text-champagne shrink-0" />
+                    <span className="text-sm font-semibold tracking-tight">
+                      Añadir a Apple Wallet (.pkpass)
+                    </span>
+                  </button>
+                )}
+
+                {(registeredData?.passType === 'google' || !isIosDevice) && (
+                  <button
+                    type="button"
+                    onClick={async () => {
+                      const serial = registeredData?.serialNumber || '';
+                      toast.info('Obteniendo pase oficial firmado de Google Wallet...');
+                      try {
+                        const res = await fetch('/api/v1/wallet/google/save-url', {
+                          method: 'POST',
+                          headers: { 'Content-Type': 'application/json' },
+                          body: JSON.stringify({ serialNumber: serial }),
+                        });
+                        const data = await res.json();
+                        if (res.ok && data.saveUrl) {
+                          window.open(data.saveUrl, '_blank', 'noopener,noreferrer');
+                        } else {
+                          toast.error('Google Wallet no disponible', {
+                            description: data.message || 'Verifica configuración del servidor.',
+                          });
+                        }
+                      } catch {
+                        toast.error('Error conectando con Google Wallet');
+                      }
+                    }}
+                    className="w-full bg-white hover:bg-zinc-100 text-zinc-950 font-bold py-3.5 px-4 rounded-xl flex items-center justify-center gap-3 shadow-lg hover:shadow-xl transition-all active:scale-[0.98] border border-white/20"
+                  >
+                    <GoogleColorIcon className="w-5 h-5 shrink-0" />
+                    <span className="text-sm font-semibold tracking-tight">Agregar a Google Wallet</span>
+                  </button>
+                )}
 
                 <button
+                  type="button"
                   onClick={() => setIsRegistered(false)}
                   className="w-full text-xs text-zinc-500 hover:text-zinc-300 text-center block pt-2"
                 >
@@ -317,24 +470,24 @@ export default function JoinPage() {
           )}
         </div>
 
-        {/* COLUMNA DERECHA: Previsualización en Vivo de la Tarjeta */}
         <div className="flex justify-center">
           <LivePassPreview
-            merchantName={store.merchant.name}
-            customerName={registeredData?.customerName || fullName || 'Carlos Mendoza'}
-            passSerialNumber={registeredData?.serialNumber || 'PASS-CANELO-001'}
+            merchantName={merchant.name}
+            customerName={registeredData?.customerName || fullName || 'Tu Nombre VIP'}
+            passSerialNumber={registeredData?.serialNumber || 'PASS-PREVIEW-001'}
             currentStamps={registeredData?.currentStamps || 1}
-            totalNeeded={store.merchant.stamps_needed}
-            rewardDescription={store.merchant.reward_description}
-            passType={selectedPassType}
-            brandColor={store.merchant.brand_color}
-            loyaltyProgramMode={store.merchant.loyalty_program_mode}
-            cardMorphology={store.merchant.card_morphology}
-            cardGradient={store.merchant.card_gradient}
-            rewardMilestones={store.merchant.reward_milestones}
-            cardPattern={store.merchant.card_pattern}
-            showEmvChip={store.merchant.show_emv_chip}
-            showHologram={store.merchant.show_hologram}
+            totalNeeded={merchant.stamps_needed}
+            rewardDescription={merchant.reward_description}
+            passType={registeredData?.passType ?? selectedPassType}
+            brandColor={merchant.brand_color}
+            loyaltyTier={registeredData?.loyaltyTier || 'bronze'}
+            loyaltyProgramMode={merchant.loyalty_program_mode}
+            cardMorphology={merchant.card_morphology}
+            cardGradient={merchant.card_gradient}
+            rewardMilestones={merchant.reward_milestones}
+            cardPattern={merchant.card_pattern}
+            showEmvChip={merchant.show_emv_chip}
+            showHologram={merchant.show_hologram}
           />
         </div>
       </div>

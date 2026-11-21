@@ -1,11 +1,11 @@
 {
-  "name": "Café Canelo · Tarjeta Digital de Lealtad",
-  "short_name": "Canelo VIP",
-  "description": "Tu tarjeta de fidelidad digital de Café Canelo. Acumula sellos, desbloquea café de cortesía y recibe beneficios exclusivos.",
+  "name": "Fidelizia · Tarjeta Digital de Lealtad",
+  "short_name": "Fidelizia",
+  "description": "Tu tarjeta de fidelidad digital. Acumula sellos, desbloquea recompensas y recibe notificaciones nativas.",
   "start_url": "/",
   "display": "standalone",
   "background_color": "#08080a",
-  "theme_color": "#09090b",
+  "theme_color": "#08080a",
   "orientation": "portrait-primary",
   "icons": [
     {
@@ -15,7 +15,7 @@
       "purpose": "any maskable"
     },
     {
-      "src": "/passes/icon.png",
+      "src": "/passes/icon-512.png",
       "sizes": "512x512",
       "type": "image/png",
       "purpose": "any maskable"

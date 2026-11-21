@@ -1,4 +1,4 @@
-import type { Metadata } from 'next';
+import type { Metadata, Viewport } from 'next';
 import './globals.css';
 import { Toaster } from 'sonner';
 
@@ -7,7 +7,13 @@ export const metadata: Metadata = {
   description:
     'Sustituye tarjetas de cartón y aplicaciones pesadas por pases nativos en Apple Wallet y Google Wallet con escáner POS antifraude, CRM RFM, Review Gate y reservas sincronizadas.',
   manifest: '/manifest.json',
+};
+
+export const viewport: Viewport = {
   themeColor: '#08080a',
+  colorScheme: 'dark',
+  width: 'device-width',
+  initialScale: 1,
 };
 
 export default function RootLayout({

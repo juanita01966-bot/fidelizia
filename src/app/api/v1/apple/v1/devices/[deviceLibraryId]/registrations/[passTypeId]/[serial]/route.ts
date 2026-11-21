@@ -1,38 +1,95 @@
-// src/app/api/v1/apple/v1/devices/[deviceLibraryId]/registrations/[passTypeId]/[serial]/route.ts
 import { NextRequest, NextResponse } from 'next/server';
-import { fideliziaStore } from '@/lib/store/fidelizia-store';
+import { z } from 'zod';
+import { appleDeviceRepo, passRepo } from '@/lib/repositories';
+import { getSupabaseAdmin } from '@/lib/supabase/server';
+import {
+  getApplePassTypeId,
+  verifyAppleAuthHeader,
+} from '@/lib/wallet/apple-wallet-service';
 
-// POST: El iPhone registra su pushToken cuando el cliente agrega el pase a Apple Wallet
+export const runtime = 'nodejs';
+
+const RegisterBodySchema = z.object({
+  pushToken: z.string().trim().min(10, 'pushToken inválido').max(512),
+});
+
 export async function POST(
   req: NextRequest,
   { params }: { params: Promise<{ deviceLibraryId: string; passTypeId: string; serial: string }> }
 ) {
-  const { deviceLibraryId, serial } = await params;
-  const authHeader = req.headers.get('Authorization');
+  const { deviceLibraryId, passTypeId, serial } = await params;
 
-  if (!authHeader || !authHeader.startsWith('ApplePass ')) {
+  if (passTypeId !== getApplePassTypeId()) {
     return new NextResponse(null, { status: 401 });
   }
 
-  const body = await req.json();
-  const pushToken = body.pushToken;
-
-  if (!pushToken) {
+  let body: unknown;
+  try {
+    body = await req.json();
+  } catch {
     return new NextResponse(null, { status: 400 });
   }
 
-  // Guarda el pushToken asociado al serial y deviceLibraryId en el store
-  await fideliziaStore.registerAppleDevice(serial, deviceLibraryId, pushToken);
+  const parsed = RegisterBodySchema.safeParse(body);
+  if (!parsed.success) {
+    return new NextResponse(null, { status: 400 });
+  }
 
-  return new NextResponse(null, { status: 201 });
+  try {
+    const supabase = getSupabaseAdmin();
+    const pass = await passRepo.getBySerial(supabase, serial);
+    if (!pass) {
+      return new NextResponse(null, { status: 404 });
+    }
+
+    if (!verifyAppleAuthHeader(req.headers.get('authorization'), pass.authentication_token)) {
+      return new NextResponse(null, { status: 401 });
+    }
+
+    const outcome = await appleDeviceRepo.registerDevice(supabase, {
+      deviceLibraryIdentifier: deviceLibraryId,
+      pushToken: parsed.data.pushToken,
+      passTypeIdentifier: passTypeId,
+      serialNumber: pass.pass_serial_number,
+    });
+
+    return new NextResponse(null, { status: outcome === 'created' ? 201 : 200 });
+  } catch (err) {
+    console.error('[Apple PassKit Register Error]:', err);
+    return new NextResponse(null, { status: 500 });
+  }
 }
 
-// DELETE: El usuario eliminó la tarjeta de su Apple Wallet
 export async function DELETE(
   req: NextRequest,
   { params }: { params: Promise<{ deviceLibraryId: string; passTypeId: string; serial: string }> }
 ) {
-  const { deviceLibraryId, serial } = await params;
-  await fideliziaStore.unregisterAppleDevice(serial, deviceLibraryId);
-  return new NextResponse(null, { status: 200 });
+  const { deviceLibraryId, passTypeId, serial } = await params;
+
+  if (passTypeId !== getApplePassTypeId()) {
+    return new NextResponse(null, { status: 401 });
+  }
+
+  try {
+    const supabase = getSupabaseAdmin();
+    const pass = await passRepo.getBySerial(supabase, serial);
+    if (!pass) {
+      return new NextResponse(null, { status: 404 });
+    }
+
+    if (!verifyAppleAuthHeader(req.headers.get('authorization'), pass.authentication_token)) {
+      return new NextResponse(null, { status: 401 });
+    }
+
+    await appleDeviceRepo.unregisterDevice(supabase, {
+      deviceLibraryIdentifier: deviceLibraryId,
+      passTypeIdentifier: passTypeId,
+      serialNumber: pass.pass_serial_number,
+    });
+
+    return new NextResponse(null, { status: 200 });
+  } catch (err) {
+    console.error('[Apple PassKit Unregister Error]:', err);
+    return new NextResponse(null, { status: 500 });
+  }
 }

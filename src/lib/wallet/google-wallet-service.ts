@@ -1,58 +1,9 @@
-// src/lib/wallet/google-wallet-service.ts
 import { GoogleAuth } from 'google-auth-library';
 import jwt from 'jsonwebtoken';
-import { Customer, WalletPass } from '@/types/domain';
-import { getStore } from '@/lib/store/fidelizia-store';
+import type { Customer, Location, Merchant, WalletPass } from '@/types/domain';
 
-// Sanitización de variables de entorno para evitar inyecciones o lecturas rotas
-const ISSUER_ID = process.env.GOOGLE_ISSUER_ID || '3388000000023227346';
-const SERVICE_ACCOUNT_EMAIL = 
-  process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL || 
-  'fidelizia-359@dynamind-509920.iam.gserviceaccount.com';
-
-export function getGooglePrivateKey(): string {
-  const raw = process.env.GOOGLE_PRIVATE_KEY || '';
-  if (!raw) return '';
-  let cleaned = raw.trim();
-  // Quitar comillas envolventes si Vercel o el usuario las pegaron
-  if ((cleaned.startsWith('"') && cleaned.endsWith('"')) || (cleaned.startsWith("'") && cleaned.endsWith("'"))) {
-    cleaned = cleaned.slice(1, -1).trim();
-  }
-  return cleaned.replace(/\\n/g, '\n');
-}
-
-export function getGoogleWalletDiagnostics() {
-  const pk = getGooglePrivateKey();
-  return {
-    issuerId: process.env.GOOGLE_ISSUER_ID || ISSUER_ID,
-    serviceAccountEmail: process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL || SERVICE_ACCOUNT_EMAIL,
-    hasPrivateKey: Boolean(pk && pk.length > 50),
-    privateKeyLength: pk.length,
-    privateKeyValidFormat: pk.includes('-----BEGIN PRIVATE KEY-----') && pk.includes('-----END PRIVATE KEY-----'),
-  };
-}
-
-const CLASS_SUFFIX = 'canelo_loyalty_v1';
-const CLASS_ID = `${ISSUER_ID}.${CLASS_SUFFIX}`;
-
-let cachedAuth: GoogleAuth | null = null;
-
-function getGoogleAuth(): GoogleAuth {
-  const pk = getGooglePrivateKey();
-  if (!cachedAuth) {
-    if (!pk || pk.length < 50) {
-      console.warn('[Google Wallet] GOOGLE_PRIVATE_KEY no configurada. Las firmas locales operarán en modo degradado.');
-    }
-    cachedAuth = new GoogleAuth({
-      credentials: {
-        client_email: SERVICE_ACCOUNT_EMAIL,
-        private_key: pk,
-      },
-      scopes: ['https://www.googleapis.com/auth/wallet_object.issuer'],
-    });
-  }
-  return cachedAuth;
-}
+const WALLETOBJECTS_BASE = 'https://walletobjects.googleapis.com/walletobjects/v1';
+const GOOGLE_PUSH_24H_LIMIT = 3;
 
 export const DEFAULT_HERO_IMAGE_URL =
   process.env.NEXT_PUBLIC_WALLET_HERO_IMAGE ||
@@ -64,110 +15,330 @@ export const DEFAULT_PROGRAM_LOGO_URL =
 
 export const DEFAULT_WALLET_HEX_BG = '#1c1007';
 
-/**
- * Asegura que la clase LoyaltyClass exista en Google Wallet antes de emitir pases.
- */
-export async function ensureGoogleLoyaltyClass(): Promise<void> {
-  const privateKey = getGooglePrivateKey();
-  if (!privateKey || privateKey.length < 50) return;
+export interface GoogleWalletResult {
+  success: boolean;
+  simulated?: boolean;
+  status?: number;
+  notSavedYet?: boolean;
+  quotaFallback?: boolean;
+  incrementedQuota?: boolean;
+  warning?: string;
+  error?: string;
+}
 
-  const auth = getGoogleAuth();
-  const client = await auth.getClient();
-  const url = `https://walletobjects.googleapis.com/walletobjects/v1/loyaltyClass/${CLASS_ID}`;
+export function getGoogleIssuerId(): string {
+  return (process.env.GOOGLE_ISSUER_ID || '').trim();
+}
 
-  const store = getStore();
-  const merchant = store.merchant;
-  const hexBg = merchant.card_gradient?.from || merchant.brand_color || DEFAULT_WALLET_HEX_BG;
+export function getGoogleServiceAccountEmail(): string {
+  return (process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL || '').trim();
+}
 
-  const heroImageUrl = DEFAULT_HERO_IMAGE_URL;
+export function getGooglePrivateKey(): string {
+  const raw = process.env.GOOGLE_PRIVATE_KEY || '';
+  if (!raw) return '';
+  let cleaned = raw.trim();
+  if (
+    (cleaned.startsWith('"') && cleaned.endsWith('"')) ||
+    (cleaned.startsWith("'") && cleaned.endsWith("'"))
+  ) {
+    cleaned = cleaned.slice(1, -1).trim();
+  }
+  return cleaned.replace(/\\n/g, '\n');
+}
 
-  const classPayload = {
-    id: CLASS_ID,
-    issuerName: merchant.name || 'Café Canelo & Specialty Roasters',
-    programName: 'Club Canelo - Fidelidad',
-    programLogo: {
-      sourceUri: {
-        uri: DEFAULT_PROGRAM_LOGO_URL,
+export function isGoogleWalletConfigured(): boolean {
+  const issuerId = getGoogleIssuerId();
+  const email = getGoogleServiceAccountEmail();
+  const pk = getGooglePrivateKey();
+  return Boolean(
+    issuerId &&
+      email &&
+      pk.length > 50 &&
+      pk.includes('BEGIN PRIVATE KEY') &&
+      pk.includes('END PRIVATE KEY')
+  );
+}
+
+export function getGoogleWalletDiagnostics() {
+  const issuerId = getGoogleIssuerId();
+  const email = getGoogleServiceAccountEmail();
+  const pk = getGooglePrivateKey();
+  const hasPrivateKey = Boolean(pk && pk.length > 50);
+  const privateKeyValidFormat =
+    pk.includes('-----BEGIN PRIVATE KEY-----') && pk.includes('-----END PRIVATE KEY-----');
+
+  return {
+    configured: Boolean(issuerId && email && hasPrivateKey && privateKeyValidFormat),
+    hasIssuerId: Boolean(issuerId),
+    hasServiceAccountEmail: Boolean(email),
+    hasPrivateKey,
+    privateKeyValidFormat,
+  };
+}
+
+export function getGoogleClassId(merchantSlug: string): string {
+  const issuerId = getGoogleIssuerId();
+  if (!issuerId) {
+    throw new Error('GOOGLE_ISSUER_ID no está configurado en el servidor.');
+  }
+  const cleanSlug = merchantSlug.trim().toLowerCase();
+  if (!cleanSlug || cleanSlug === 'cafe-canelo') {
+    return `${issuerId}.canelo_loyalty_v1`;
+  }
+  const safeSuffix = cleanSlug.replace(/[^a-z0-9_]/g, '_');
+  return `${issuerId}.${safeSuffix}_loyalty_v1`;
+}
+
+export function getGoogleObjectId(serialNumber: string): string {
+  const issuerId = getGoogleIssuerId();
+  if (!issuerId) {
+    throw new Error('GOOGLE_ISSUER_ID no está configurado en el servidor.');
+  }
+  return `${issuerId}.${serialNumber.trim()}`;
+}
+
+let cachedAuth: GoogleAuth | null = null;
+let cachedAuthKeyFingerprint = '';
+
+function getGoogleAuth(): GoogleAuth {
+  const email = getGoogleServiceAccountEmail();
+  const pk = getGooglePrivateKey();
+  const fingerprint = `${email}:${pk.slice(0, 32)}:${pk.length}`;
+
+  if (!cachedAuth || cachedAuthKeyFingerprint !== fingerprint) {
+    cachedAuth = new GoogleAuth({
+      credentials: {
+        client_email: email,
+        private_key: pk,
       },
+      scopes: ['https://www.googleapis.com/auth/wallet_object.issuer'],
+    });
+    cachedAuthKeyFingerprint = fingerprint;
+  }
+
+  return cachedAuth;
+}
+
+export function resetGoogleAuthForTests(): void {
+  cachedAuth = null;
+  cachedAuthKeyFingerprint = '';
+}
+
+function buildAllowedOrigins(requestOrigin?: string): string[] {
+  const candidates = [process.env.NEXT_PUBLIC_APP_URL, requestOrigin];
+  const validOrigins: string[] = [];
+
+  for (const candidate of candidates) {
+    if (!candidate) continue;
+    try {
+      const url = new URL(candidate.trim());
+      if (url.protocol === 'https:' || url.protocol === 'http:') {
+        validOrigins.push(url.origin);
+      }
+    } catch {
+      // Ignore malformed origin values
+    }
+  }
+
+  return Array.from(new Set(validOrigins));
+}
+
+function resolveMerchantColors(merchant: Merchant): string {
+  return merchant.card_gradient?.from || merchant.brand_color || DEFAULT_WALLET_HEX_BG;
+}
+
+function resolveProgramLogoUrl(merchant: Merchant): string {
+  if (merchant.logo_url && /^https?:\/\/.+/.test(merchant.logo_url)) {
+    return merchant.logo_url;
+  }
+  return DEFAULT_PROGRAM_LOGO_URL;
+}
+
+function mapLocationsPayload(locations: Location[]) {
+  return locations
+    .filter((l) => l.is_active && Number.isFinite(l.latitude) && Number.isFinite(l.longitude))
+    .map((l) => ({
+      latitude: l.latitude,
+      longitude: l.longitude,
+    }));
+}
+
+function buildLoyaltyClassPayload(merchant: Merchant, locations: Location[], includeReviewStatus: boolean) {
+  const classId = getGoogleClassId(merchant.slug);
+  const hexBg = resolveMerchantColors(merchant);
+  const logoUrl = resolveProgramLogoUrl(merchant);
+  const mappedLocations = mapLocationsPayload(locations);
+
+  const payload: Record<string, unknown> = {
+    id: classId,
+    issuerName: merchant.name,
+    programName: `${merchant.name} · Club VIP`,
+    programLogo: {
+      sourceUri: { uri: logoUrl },
       contentDescription: {
-        defaultValue: { language: 'es-CO', value: `${merchant.name || 'Café Canelo'} Logo` },
+        defaultValue: { language: 'es-CO', value: `${merchant.name} Logo` },
       },
     },
     heroImage: {
-      sourceUri: {
-        uri: heroImageUrl,
-      },
+      sourceUri: { uri: DEFAULT_HERO_IMAGE_URL },
       contentDescription: {
-        defaultValue: { language: 'es-CO', value: `${merchant.name || 'Café Canelo'} Tarjeta Oficial` },
+        defaultValue: { language: 'es-CO', value: `${merchant.name} Tarjeta Oficial` },
       },
     },
     hexBackgroundColor: hexBg,
-    reviewStatus: 'UNDER_REVIEW',
-    locations: [
-      {
-        latitude: 4.6682,
-        longitude: -74.0538,
-      },
-    ],
+    ...(mappedLocations.length > 0 ? { locations: mappedLocations } : {}),
   };
 
+  if (includeReviewStatus) {
+    payload.reviewStatus = 'UNDER_REVIEW';
+  }
+
+  return payload;
+}
+
+function buildPointsFields(pass: WalletPass, merchant: Merchant, customer?: Customer) {
+  const totalStamps = Math.max(1, merchant.stamps_needed || 10);
+  const currentStamps = Math.max(0, pass.current_stamps || 0);
+  const isRewardReady = currentStamps >= totalStamps;
+  const filledIcons = '⭐'.repeat(Math.min(currentStamps, totalStamps));
+  const emptyIcons = '⚪'.repeat(Math.max(0, totalStamps - currentStamps));
+  const stampsVisual = `${filledIcons}${emptyIcons}`;
+  const rewardLabel = customer?.custom_reward || merchant.reward_description || 'Premio de Autor';
+
+  return {
+    totalStamps,
+    currentStamps,
+    isRewardReady,
+    loyaltyPoints: {
+      label: isRewardReady ? '🎉 ¡PREMIO DESBLOQUEADO!' : `Progreso de Sellos (${currentStamps}/${totalStamps})`,
+      balance: {
+        string: isRewardReady
+          ? `🏆 ${currentStamps}/${totalStamps} SELLOS COMPLETOS`
+          : `${stampsVisual} (${currentStamps}/${totalStamps})`,
+      },
+    },
+    secondaryLoyaltyPoints: {
+      label: isRewardReady ? 'Premio en Caja' : 'Meta de Recompensa',
+      balance: {
+        string: isRewardReady
+          ? rewardLabel
+          : `${Math.max(0, totalStamps - currentStamps)} sellos restantes para: ${rewardLabel}`,
+      },
+    },
+  };
+}
+
+function extractGoogleError(err: unknown): { status?: number; message: string; isQuotaError: boolean } {
+  const errObj = err as {
+    response?: { status?: number; data?: { error?: { message?: string; status?: string } } };
+    message?: string;
+  };
+  const status = errObj?.response?.status;
+  const apiMessage = errObj?.response?.data?.error?.message || errObj?.message || 'Error desconocido de Google Wallet';
+  const apiStatus = errObj?.response?.data?.error?.status || '';
+  const isQuotaError =
+    status === 429 ||
+    apiStatus === 'RESOURCE_EXHAUSTED' ||
+    /quota|rate limit|notification limit|too many/i.test(apiMessage);
+  return { status, message: apiMessage, isQuotaError };
+}
+
+/**
+ * Garantiza que exista la LoyaltyClass en Google Wallet.
+ * En creación usa reviewStatus='UNDER_REVIEW'; en actualización (PATCH) NUNCA sobreescribe reviewStatus.
+ */
+export async function ensureGoogleLoyaltyClass(
+  merchant: Merchant,
+  locations: Location[] = []
+): Promise<GoogleWalletResult> {
+  if (!isGoogleWalletConfigured()) {
+    return {
+      success: false,
+      simulated: true,
+      error: 'Credenciales de Google Wallet no configuradas.',
+    };
+  }
+
+  const classId = getGoogleClassId(merchant.slug);
+  const classUrl = `${WALLETOBJECTS_BASE}/loyaltyClass/${encodeURIComponent(classId)}`;
+  const auth = getGoogleAuth();
+  const client = await auth.getClient();
+
   try {
-    const existing = await client.request({ url, method: 'GET' });
-    if (existing.status === 200) {
-      await client.request({
-        url: `${url}?updateMask=heroImage,hexBackgroundColor,programLogo,issuerName,programName,reviewStatus`,
-        method: 'PATCH',
-        data: classPayload,
-      });
-      console.log('[Google Wallet]: Clase LoyaltyClass actualizada con éxito en Google.');
-    }
+    await client.request({ url: classUrl, method: 'GET' });
+    const updateMask = [
+      'heroImage',
+      'hexBackgroundColor',
+      'programLogo',
+      'issuerName',
+      'programName',
+      ...(locations.length > 0 ? ['locations'] : []),
+    ].join(',');
+    const patchPayload = buildLoyaltyClassPayload(merchant, locations, false);
+    await client.request({
+      url: `${classUrl}?updateMask=${updateMask}`,
+      method: 'PATCH',
+      data: patchPayload,
+    });
+    return { success: true, status: 200 };
   } catch (err: unknown) {
-    const errorObj = err as { response?: { status?: number } };
-    if (errorObj.response && errorObj.response.status === 404) {
+    const parsed = extractGoogleError(err);
+    if (parsed.status === 404) {
+      const createPayload = buildLoyaltyClassPayload(merchant, locations, true);
       await client.request({
-        url: 'https://walletobjects.googleapis.com/walletobjects/v1/loyaltyClass',
+        url: `${WALLETOBJECTS_BASE}/loyaltyClass`,
         method: 'POST',
-        data: classPayload,
+        data: createPayload,
       });
-      console.log('[Google Wallet]: Clase LoyaltyClass creada con éxito en Google.');
-    } else {
-      console.warn('[Google Wallet]: Error al verificar/actualizar clase:', err);
+      return { success: true, status: 200 };
     }
+    return { success: false, status: parsed.status, error: parsed.message };
   }
 }
 
 /**
- * Actualiza en caliente el diseño visual (color de fondo hex, nombre, logo, hero) en la clase de Google Wallet.
- * Google Wallet propaga automáticamente los cambios a todas las tarjetas emitidas a los teléfonos de los clientes.
+ * Actualiza el diseño visual de la clase en caliente sin alterar reviewStatus.
  */
-export async function updateGoogleLoyaltyClassDesign(options?: {
-  hexBackgroundColor?: string;
-  issuerName?: string;
-  programName?: string;
-  heroImageUrl?: string;
-}): Promise<{ success: boolean; hexBackgroundColor?: string }> {
-  const privateKey = getGooglePrivateKey();
-  if (!privateKey || privateKey.length < 50) {
-    console.log('[Google Wallet Simulación]: Actualización de diseño en clase simulada.');
-    return { success: true, hexBackgroundColor: options?.hexBackgroundColor };
+export async function updateGoogleLoyaltyClassDesign(
+  merchant: Merchant,
+  locations: Location[] = [],
+  options?: {
+    hexBackgroundColor?: string;
+    issuerName?: string;
+    programName?: string;
+    heroImageUrl?: string;
+  }
+): Promise<GoogleWalletResult & { hexBackgroundColor?: string }> {
+  const hexBg = options?.hexBackgroundColor || resolveMerchantColors(merchant);
+  if (!isGoogleWalletConfigured()) {
+    return {
+      success: false,
+      simulated: true,
+      hexBackgroundColor: hexBg,
+      error: 'Credenciales de Google Wallet no configuradas.',
+    };
   }
 
+  const classId = getGoogleClassId(merchant.slug);
+  const classUrl = `${WALLETOBJECTS_BASE}/loyaltyClass/${encodeURIComponent(classId)}`;
   const auth = getGoogleAuth();
   const client = await auth.getClient();
-  const url = `https://walletobjects.googleapis.com/walletobjects/v1/loyaltyClass/${CLASS_ID}`;
 
-  const store = getStore();
-  const merchant = store.merchant;
-  const hexBg = options?.hexBackgroundColor || merchant.card_gradient?.from || merchant.brand_color || DEFAULT_WALLET_HEX_BG;
-  const issuerName = options?.issuerName || merchant.name || 'Café Canelo & Specialty Roasters';
-  const programName = options?.programName || 'Club Canelo - Fidelidad';
+  const issuerName = options?.issuerName || merchant.name;
+  const programName = options?.programName || `${merchant.name} · Club VIP`;
   const heroImageUrl = options?.heroImageUrl || DEFAULT_HERO_IMAGE_URL;
 
   const patchPayload = {
     hexBackgroundColor: hexBg,
-    reviewStatus: 'UNDER_REVIEW',
     issuerName,
     programName,
+    programLogo: {
+      sourceUri: { uri: resolveProgramLogoUrl(merchant) },
+      contentDescription: {
+        defaultValue: { language: 'es-CO', value: `${issuerName} Logo` },
+      },
+    },
     heroImage: {
       sourceUri: { uri: heroImageUrl },
       contentDescription: {
@@ -177,43 +348,64 @@ export async function updateGoogleLoyaltyClassDesign(options?: {
   };
 
   try {
-    const response = await client.request({
-      url: `${url}?updateMask=hexBackgroundColor,reviewStatus,issuerName,programName,heroImage`,
+    await client.request({
+      url: `${classUrl}?updateMask=hexBackgroundColor,issuerName,programName,programLogo,heroImage`,
       method: 'PATCH',
       data: patchPayload,
     });
-    console.log(`[Google Wallet Sync OK]: Clase ${CLASS_ID} actualizada en Google. Nuevo color: ${hexBg}`);
-    return { success: true, hexBackgroundColor: hexBg };
-  } catch (err) {
-    console.warn('[Google Wallet Design Update Error]:', err);
-    return { success: false, hexBackgroundColor: hexBg };
+    return { success: true, status: 200, hexBackgroundColor: hexBg };
+  } catch (err: unknown) {
+    const parsed = extractGoogleError(err);
+    if (parsed.status === 404) {
+      const ensured = await ensureGoogleLoyaltyClass(merchant, locations);
+      return { ...ensured, hexBackgroundColor: hexBg };
+    }
+    return { success: false, status: parsed.status, error: parsed.message, hexBackgroundColor: hexBg };
   }
 }
 
 /**
- * Crea el LoyaltyObject con el QR del serial, lo firma con RS256 y devuelve la URL de guardado.
- * Integra la arquitectura dual ('single_card' vs 'multi_tier') y la Escalera de Premios por Hitos.
+ * Construye el LoyaltyObject + JWT RS256 firmado para "Add to Google Wallet".
  */
 export async function generateGoogleWalletSaveUrl(
   customer: Customer,
-  pass: WalletPass
+  pass: WalletPass,
+  merchant: Merchant,
+  locations: Location[] = [],
+  requestOrigin?: string
 ): Promise<string> {
-  const store = getStore();
-  const merchant = store.merchant;
-  const isSingleCard = merchant.loyalty_program_mode === 'single_card';
-  const hexBg = merchant.card_gradient?.from || merchant.brand_color || DEFAULT_WALLET_HEX_BG;
+  if (!isGoogleWalletConfigured()) {
+    throw new Error(
+      'Google Wallet no está configurado en el servidor (faltan GOOGLE_ISSUER_ID, GOOGLE_SERVICE_ACCOUNT_EMAIL o GOOGLE_PRIVATE_KEY).'
+    );
+  }
 
-  const objectId = `${ISSUER_ID}.${pass.pass_serial_number}`;
+  // Intentar asegurar la clase en Google API antes de emitir el JWT (sin bloquear si el mock/red responde luego)
+  try {
+    await ensureGoogleLoyaltyClass(merchant, locations);
+  } catch (err) {
+    console.warn('[Google Wallet] No se pudo pre-verificar LoyaltyClass:', err);
+  }
+
+  const classId = getGoogleClassId(merchant.slug);
+  const objectId = getGoogleObjectId(pass.pass_serial_number);
+  const points = buildPointsFields(pass, merchant, customer);
+  const mappedLocations = mapLocationsPayload(locations);
+  const primaryLoc = locations.find((l) => l.is_active) || locations[0];
 
   const textModules = [
     {
-      id: 'sede_bogota',
-      header: 'Sede Chapinero (Bogotá)',
-      body: `Calle 85 # 11-53. Meta: ${merchant.stamps_needed || 10} sellos para ${merchant.reward_description || 'Premio de Autor'}. Presenta este código en caja.`,
+      id: 'sede_principal',
+      header: primaryLoc ? primaryLoc.name : merchant.name,
+      body: `${primaryLoc ? `${primaryLoc.address}. ` : ''}Meta: ${points.totalStamps} sellos para ${customer.custom_reward || merchant.reward_description}. Presenta este código en caja.`,
     },
   ];
 
-  if (isSingleCard && merchant.reward_milestones && merchant.reward_milestones.length > 0) {
+  if (
+    merchant.loyalty_program_mode === 'single_card' &&
+    merchant.reward_milestones &&
+    merchant.reward_milestones.length > 0
+  ) {
     const milestonesText = merchant.reward_milestones
       .map((m) => `• Sello #${m.stamp_number}: ${m.reward}`)
       .join('\n');
@@ -224,93 +416,34 @@ export async function generateGoogleWalletSaveUrl(
     });
   }
 
-  const totalStamps = merchant.stamps_needed || 8;
-  const currentStamps = pass.current_stamps || 0;
-  const isRewardReady = currentStamps >= totalStamps;
-  const filledIcons = '⭐'.repeat(Math.min(currentStamps, totalStamps));
-  const emptyIcons = '⚪'.repeat(Math.max(0, totalStamps - currentStamps));
-  const stampsVisual = `${filledIcons}${emptyIcons}`;
-
-  const heroImageUrl = DEFAULT_HERO_IMAGE_URL;
-
-  const loyaltyObject = {
+  const loyaltyObject: Record<string, unknown> = {
     id: objectId,
-    classId: CLASS_ID,
+    classId,
     state: pass.status === 'active' ? 'ACTIVE' : 'INACTIVE',
     accountId: pass.pass_serial_number,
     accountName: customer.full_name,
     heroImage: {
-      sourceUri: {
-        uri: heroImageUrl,
-      },
+      sourceUri: { uri: DEFAULT_HERO_IMAGE_URL },
       contentDescription: {
-        defaultValue: { language: 'es-CO', value: `${merchant.name || 'Café Canelo'} Tarjeta Oficial` },
+        defaultValue: { language: 'es-CO', value: `${merchant.name} Tarjeta Oficial` },
       },
     },
-    loyaltyPoints: {
-      label: isRewardReady ? '🎉 ¡PREMIO DESBLOQUEADO!' : `Progreso de Sellos (${currentStamps}/${totalStamps})`,
-      balance: {
-        string: isRewardReady ? `🏆 ${currentStamps}/${totalStamps} SELLOS COMPLETOS` : `${stampsVisual} (${currentStamps}/${totalStamps})`,
-      },
-    },
-    secondaryLoyaltyPoints: {
-      label: isRewardReady ? 'Premio en Caja' : 'Meta de Recompensa',
-      balance: {
-        string: isRewardReady 
-          ? (merchant.reward_description || 'Premio de Autor Reclamable') 
-          : `${totalStamps - currentStamps} sellos restantes para: ${merchant.reward_description || 'Premio'}`,
-      },
-    },
+    loyaltyPoints: points.loyaltyPoints,
+    secondaryLoyaltyPoints: points.secondaryLoyaltyPoints,
     barcode: {
       type: 'QR_CODE',
       value: pass.pass_serial_number,
       alternateText: pass.pass_serial_number,
     },
-    locations: [
-      {
-        latitude: 4.6682,
-        longitude: -74.0538,
-      },
-    ],
     textModulesData: textModules,
+    ...(mappedLocations.length > 0 ? { locations: mappedLocations } : {}),
   };
 
-  const loyaltyClass = {
-    id: CLASS_ID,
-    issuerName: merchant.name || 'Café Canelo & Specialty Roasters',
-    programName: 'Club Canelo - Fidelidad',
-    programLogo: {
-      sourceUri: {
-        uri: process.env.NEXT_PUBLIC_LOGO_URL || 'https://images.unsplash.com/photo-1501339847302-ac426a4a7cbb?w=500&auto=format&fit=crop&q=60',
-      },
-      contentDescription: {
-        defaultValue: { language: 'es-CO', value: `${merchant.name || 'Café Canelo'} Logo` },
-      },
-    },
-    heroImage: {
-      sourceUri: {
-        uri: heroImageUrl,
-      },
-      contentDescription: {
-        defaultValue: { language: 'es-CO', value: `${merchant.name || 'Café Canelo'} Banner` },
-      },
-    },
-    hexBackgroundColor: hexBg,
-    reviewStatus: 'UNDER_REVIEW',
-  };
-
-  const currentOrigin = process.env.NEXT_PUBLIC_APP_URL || 'http://localhost:3000';
-  const origins = Array.from(new Set([
-    'http://localhost:3000',
-    'http://192.168.1.5:3000',
-    'http://192.168.1.8:3000',
-    'http://192.168.1.129:3000',
-    'https://slimy-mangos-occur.loca.lt',
-    currentOrigin,
-  ])).filter(Boolean);
+  const loyaltyClass = buildLoyaltyClassPayload(merchant, locations, true);
+  const origins = buildAllowedOrigins(requestOrigin);
 
   const claims = {
-    iss: SERVICE_ACCOUNT_EMAIL,
+    iss: getGoogleServiceAccountEmail(),
     aud: 'google',
     origins,
     typ: 'savetowallet',
@@ -320,133 +453,188 @@ export async function generateGoogleWalletSaveUrl(
     },
   };
 
-  const privateKey = getGooglePrivateKey();
-
-  // Fallback amigable para demo local si no hay certificados
-  if (!privateKey || privateKey.length < 50) {
-    const dummyJwt = Buffer.from(JSON.stringify(claims)).toString('base64');
-    return `https://pay.google.com/gp/v/save/${dummyJwt}`;
-  }
-
-  const token = jwt.sign(claims, privateKey, { algorithm: 'RS256' });
+  const token = jwt.sign(claims, getGooglePrivateKey(), { algorithm: 'RS256' });
   return `https://pay.google.com/gp/v/save/${token}`;
 }
 
 /**
- * Hace el PATCH a Google Wallet API para actualizar los sellos y disparar notificación push nativa.
+ * Actualiza puntos/sellos en Google Wallet usando notifyPreference='NOTIFY_ON_UPDATE'
+ * sin sobrescribir ni destruir el historial de mensajes del usuario.
  */
-export async function updateGooglePassStamps(
-  serialNumber: string,
-  newStamps: number,
-  message: string
-): Promise<{ success: boolean; simulated?: boolean; error?: string }> {
-  const privateKey = getGooglePrivateKey();
-  if (!privateKey || privateKey.length < 50) {
-    console.warn(`[Google Wallet Simulación]: GOOGLE_PRIVATE_KEY no configurada. Simulado para ${serialNumber}`);
+export async function syncGooglePassStamps(
+  pass: WalletPass,
+  merchant: Merchant,
+  options?: { customer?: Customer; notify?: boolean }
+): Promise<GoogleWalletResult> {
+  if (!isGoogleWalletConfigured()) {
     return {
       success: false,
       simulated: true,
-      error: 'GOOGLE_PRIVATE_KEY no configurada en las variables de entorno de Vercel.',
+      error: 'Credenciales de Google Wallet no configuradas en el servidor.',
     };
   }
 
-  const store = getStore();
-  const totalStamps = store.merchant.stamps_needed || 8;
-  const isRewardReady = newStamps >= totalStamps;
-  const filledIcons = '⭐'.repeat(Math.min(newStamps, totalStamps));
-  const emptyIcons = '⚪'.repeat(Math.max(0, totalStamps - newStamps));
-  const stampsVisual = `${filledIcons}${emptyIcons}`;
+  const objectId = getGoogleObjectId(pass.pass_serial_number);
+  const points = buildPointsFields(pass, merchant, options?.customer);
+  const shouldNotify = options?.notify !== false;
+  const url = `${WALLETOBJECTS_BASE}/loyaltyObject/${encodeURIComponent(objectId)}?updateMask=loyaltyPoints,secondaryLoyaltyPoints,heroImage,state`;
+
+  const patchPayload: Record<string, unknown> = {
+    state: pass.status === 'active' ? 'ACTIVE' : 'INACTIVE',
+    heroImage: {
+      sourceUri: { uri: DEFAULT_HERO_IMAGE_URL },
+      contentDescription: {
+        defaultValue: { language: 'es-CO', value: `${merchant.name} Tarjeta Oficial` },
+      },
+    },
+    loyaltyPoints: points.loyaltyPoints,
+    secondaryLoyaltyPoints: points.secondaryLoyaltyPoints,
+    ...(shouldNotify ? { notifyPreference: 'NOTIFY_ON_UPDATE' } : {}),
+  };
 
   try {
     const auth = getGoogleAuth();
     const client = await auth.getClient();
-    const objectId = `${ISSUER_ID}.${serialNumber}`;
-    const url = `https://walletobjects.googleapis.com/walletobjects/v1/loyaltyObject/${objectId}?updateMask=loyaltyPoints,secondaryLoyaltyPoints,messages,heroImage`;
-
-    const heroImageUrl = DEFAULT_HERO_IMAGE_URL;
-
-    const patchPayload = {
-      heroImage: {
-        sourceUri: {
-          uri: heroImageUrl,
-        },
-        contentDescription: {
-          defaultValue: { language: 'es-CO', value: `${store.merchant.name || 'Café Canelo'} Tarjeta Oficial` },
-        },
-      },
-      loyaltyPoints: {
-        label: isRewardReady ? '🎉 ¡PREMIO DESBLOQUEADO!' : `Progreso de Sellos (${newStamps}/${totalStamps})`,
-        balance: {
-          string: isRewardReady ? `🏆 ${newStamps}/${totalStamps} SELLOS COMPLETOS` : `${stampsVisual} (${newStamps}/${totalStamps})`,
-        },
-      },
-      secondaryLoyaltyPoints: {
-        label: isRewardReady ? 'Premio Reclamable' : 'Meta de Recompensa',
-        balance: {
-          string: isRewardReady 
-            ? (store.merchant.reward_description || 'Premio de Autor Listo') 
-            : `${totalStamps - newStamps} sellos para: ${store.merchant.reward_description || 'Premio'}`,
-        },
-      },
-      messages: [
-        {
-          id: `msg-${Date.now()}`,
-          header: isRewardReady ? '🎉 ¡PREMIO LISTO PARA RECLAMAR!' : (store.merchant.name || 'Café Canelo & Specialty Roasters'),
-          body: message,
-          messageType: 'TEXT_AND_NOTIFY', // Dispara notificación push en la pantalla de bloqueo de Android
-        },
-      ],
-    };
-
     await client.request({
       url,
       method: 'PATCH',
       data: patchPayload,
     });
-    console.log(`[Google Wallet Sync OK]: Pase ${serialNumber} actualizado a ${newStamps} sellos. Push emitido: "${message}"`);
-    return { success: true };
-  } catch (err: any) {
-    const apiError = err?.response?.data?.error?.message || err?.message || 'Error desconocido';
-    const status = err?.response?.status;
-    console.warn(`[Google Wallet PATCH Error ${status}]:`, apiError);
+    return { success: true, status: 200 };
+  } catch (err: unknown) {
+    const parsed = extractGoogleError(err);
     return {
       success: false,
-      error: status === 404
-        ? `El pase (${serialNumber}) aún no ha sido añadido a Google Wallet en el celular, o no existe en Google.`
-        : `Google Wallet API (${status || 'Error'}): ${apiError}`,
+      status: parsed.status,
+      notSavedYet: parsed.status === 404,
+      error:
+        parsed.status === 404
+          ? `El pase (${pass.pass_serial_number}) aún no ha sido guardado en Google Wallet del cliente.`
+          : `Google Wallet API (${parsed.status || 'Error'}): ${parsed.message}`,
     };
   }
 }
 
 /**
- * Emite una campaña de notificación masiva o por segmento a los pases activos de Google Wallet.
+ * Envía una notificación push nativa en pantalla de bloqueo de Google Wallet usando
+ * el endpoint oficial POST /loyaltyObject/{id}/addMessage con TEXT_AND_NOTIFY.
+ * Controla la cuota de 3 notificaciones push por cada 24 horas haciendo fallback seguro a TEXT.
  */
-export async function broadcastGoogleWalletNotification(
-  serials: string[],
+export async function sendGoogleWalletNotification(
+  pass: WalletPass,
+  merchant: Merchant,
   title: string,
-  body: string
-): Promise<{ successCount: number; failureCount: number; errors: string[] }> {
-  let successCount = 0;
-  let failureCount = 0;
-  const errors: string[] = [];
+  body: string,
+  options?: { displayDurationHours?: number }
+): Promise<GoogleWalletResult> {
+  if (!isGoogleWalletConfigured()) {
+    return {
+      success: false,
+      simulated: true,
+      error: 'Credenciales de Google Wallet no configuradas en el servidor.',
+    };
+  }
 
-  for (const serial of serials) {
+  const objectId = getGoogleObjectId(pass.pass_serial_number);
+  const addMessageUrl = `${WALLETOBJECTS_BASE}/loyaltyObject/${encodeURIComponent(objectId)}/addMessage`;
+
+  const nowMs = Date.now();
+  const durationHours = Math.max(1, Math.min(72, options?.displayDurationHours ?? 24));
+  const startIso = new Date(nowMs).toISOString();
+  const endIso = new Date(nowMs + durationHours * 60 * 60 * 1000).toISOString();
+
+  const windowActive =
+    Boolean(pass.push_window_reset_at) &&
+    new Date(pass.push_window_reset_at as string).getTime() > nowMs;
+  const quotaReached = windowActive && (pass.push_count_24h ?? 0) >= GOOGLE_PUSH_24H_LIMIT;
+
+  const buildMessagePayload = (messageType: 'TEXT_AND_NOTIFY' | 'TEXT') => ({
+    message: {
+      id: `msg-${nowMs}-${Math.random().toString(36).slice(2, 7)}`,
+      header: title.trim() || merchant.name,
+      body: body.trim(),
+      messageType,
+      displayInterval: {
+        start: { date: startIso },
+        end: { date: endIso },
+      },
+    },
+  });
+
+  const auth = getGoogleAuth();
+  const client = await auth.getClient();
+
+  if (quotaReached) {
     try {
-      const store = getStore();
-      const pass = store.passes.find((p) => p.pass_serial_number === serial);
-      const stamps = pass ? pass.current_stamps : 1;
-      const res = await updateGooglePassStamps(serial, stamps, `${title}: ${body}`);
-      if (res.success) {
-        successCount++;
-      } else {
-        failureCount++;
-        if (res.error) errors.push(res.error);
-      }
-    } catch (e: any) {
-      failureCount++;
-      errors.push(e?.message || 'Error en broadcast');
+      await client.request({
+        url: addMessageUrl,
+        method: 'POST',
+        data: buildMessagePayload('TEXT'),
+      });
+      return {
+        success: true,
+        status: 200,
+        quotaFallback: true,
+        incrementedQuota: false,
+        warning: 'Cuota de 3 notificaciones push/24h alcanzada: mensaje guardado silenciosamente en el pase (TEXT).',
+      };
+    } catch (fallbackErr: unknown) {
+      const parsed = extractGoogleError(fallbackErr);
+      return {
+        success: false,
+        status: parsed.status,
+        notSavedYet: parsed.status === 404,
+        error: `Google Wallet API (${parsed.status || 'Error'}): ${parsed.message}`,
+      };
     }
   }
 
-  return { successCount, failureCount, errors };
+  try {
+    await client.request({
+      url: addMessageUrl,
+      method: 'POST',
+      data: buildMessagePayload('TEXT_AND_NOTIFY'),
+    });
+    return {
+      success: true,
+      status: 200,
+      quotaFallback: false,
+      incrementedQuota: true,
+    };
+  } catch (err: unknown) {
+    const parsed = extractGoogleError(err);
+    if (parsed.isQuotaError) {
+      try {
+        await client.request({
+          url: addMessageUrl,
+          method: 'POST',
+          data: buildMessagePayload('TEXT'),
+        });
+        return {
+          success: true,
+          status: 200,
+          quotaFallback: true,
+          incrementedQuota: false,
+          warning: 'Límite 24h de Google Wallet alcanzado: mensaje agregado como TEXT silencioso.',
+        };
+      } catch (retryErr: unknown) {
+        const retryParsed = extractGoogleError(retryErr);
+        return {
+          success: false,
+          status: retryParsed.status,
+          error: `Google Wallet API (${retryParsed.status || 'Error'}): ${retryParsed.message}`,
+        };
+      }
+    }
+
+    return {
+      success: false,
+      status: parsed.status,
+      notSavedYet: parsed.status === 404,
+      error:
+        parsed.status === 404
+          ? `El pase (${pass.pass_serial_number}) aún no ha sido guardado en Google Wallet del cliente.`
+          : `Google Wallet API (${parsed.status || 'Error'}): ${parsed.message}`,
+    };
+  }
 }

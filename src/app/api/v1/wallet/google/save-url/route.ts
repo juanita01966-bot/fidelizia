@@ -1,122 +1,132 @@
-// src/app/api/v1/wallet/google/save-url/route.ts
 import { NextRequest, NextResponse } from 'next/server';
-import { fideliziaStore } from '@/lib/store/fidelizia-store';
-import { supabaseAdmin } from '@/lib/supabase/server';
-import { generateGoogleWalletSaveUrl } from '@/lib/wallet/google-wallet-service';
-import { Customer, WalletPass } from '@/types/domain';
+import { z } from 'zod';
+import { applyRateLimit } from '@/lib/api/rate-limit';
+import { parseJsonBody, parseSearchParams } from '@/lib/api/validation';
+import { passRepo } from '@/lib/repositories';
+import { getSupabaseAdmin } from '@/lib/supabase/server';
+import {
+  generateGoogleWalletSaveUrl,
+  isGoogleWalletConfigured,
+} from '@/lib/wallet/google-wallet-service';
 
-async function resolveRecord(serial: string, customerName: string, phone: string, stamps: number): Promise<{ customer: Customer; pass: WalletPass }> {
-  // 1. Buscar en store en memoria
-  let record = await fideliziaStore.getPassWithCustomerBySerial(serial);
-  if (record) return record;
+export const runtime = 'nodejs';
 
-  // 2. Buscar en Supabase
-  try {
-    const { data: dbPass } = await supabaseAdmin
-      .from('wallet_passes')
-      .select('*, customers(*)')
-      .eq('pass_serial_number', serial)
-      .maybeSingle();
-
-    if (dbPass && dbPass.customers) {
-      const cust = dbPass.customers as any;
-      const mappedRecord = {
-        customer: {
-          id: cust.id,
-          merchant_id: cust.merchant_id,
-          phone: cust.phone,
-          full_name: cust.full_name,
-          birthdate: cust.birthdate || null,
-          terms_accepted_at: cust.terms_accepted_at,
-          rfm_segment: cust.rfm_segment || 'new',
-          created_at: cust.created_at,
-          updated_at: cust.updated_at,
-        },
-        pass: {
-          id: dbPass.id,
-          customer_id: dbPass.customer_id,
-          merchant_id: dbPass.merchant_id,
-          pass_type: dbPass.pass_type as any,
-          pass_serial_number: dbPass.pass_serial_number,
-          push_token: dbPass.push_token || null,
-          authentication_token: dbPass.authentication_token || `auth-${dbPass.pass_serial_number}`,
-          current_stamps: dbPass.current_stamps,
-          total_visits: dbPass.total_visits,
-          total_rewards_redeemed: dbPass.total_rewards_redeemed,
-          last_visit_at: dbPass.last_visit_at || null,
-          status: dbPass.status as any,
-          created_at: dbPass.created_at,
-          updated_at: dbPass.updated_at,
-        },
-      };
-
-      // Registrar también en memoria
-      fideliziaStore.syncFromRemote({
-        customers: [mappedRecord.customer],
-        passes: [mappedRecord.pass],
-      });
-
-      return mappedRecord;
-    }
-  } catch (e) {
-    console.warn('[SaveUrl] Supabase resolve pass error:', e);
-  }
-
-  // 3. Registrar al vuelo si no existe
-  const created = fideliziaStore.registerCustomer({
-    fullName: customerName,
-    phone: phone || '+573000000000',
-    passType: 'google',
+const SaveUrlPostSchema = z
+  .object({
+    serialNumber: z.string().trim().min(3).max(100).optional(),
+    serial: z.string().trim().min(3).max(100).optional(),
+  })
+  .refine((v) => Boolean(v.serialNumber || v.serial), {
+    message: 'Número de serial requerido',
   });
-  created.pass.pass_serial_number = serial;
-  created.pass.current_stamps = stamps;
-  return { customer: created.customer, pass: created.pass };
-}
+
+const SaveUrlQuerySchema = z.object({
+  serial: z.string().trim().min(3).max(100),
+});
 
 export async function POST(req: NextRequest) {
-  try {
-    const body = await req.json();
-    const serial = body.serialNumber || body.serial;
-    const customerName = body.customerName || body.name || 'Cliente VIP Canelo';
-    const currentStamps = typeof body.currentStamps === 'number' ? body.currentStamps : 1;
-    const phone = body.phone || '+573000000000';
+  const rateLimit = applyRateLimit(req, 'wallet:google:save-url', {
+    limit: 60,
+    windowMs: 60_000,
+  });
+  if (!rateLimit.allowed) {
+    return rateLimit.response;
+  }
 
-    if (!serial) {
-      return NextResponse.json({ error: 'Número de serial requerido' }, { status: 400 });
+  const parsed = await parseJsonBody(req, SaveUrlPostSchema);
+  if (!parsed.success) {
+    return parsed.response;
+  }
+
+  const serial = (parsed.data.serialNumber || parsed.data.serial || '').trim();
+
+  if (!isGoogleWalletConfigured()) {
+    return NextResponse.json(
+      {
+        error: 'WALLET_NOT_CONFIGURED',
+        message: 'Google Wallet no está configurado en las variables de entorno del servidor.',
+      },
+      { status: 503, headers: rateLimit.headers }
+    );
+  }
+
+  try {
+    const supabase = getSupabaseAdmin();
+    const bundle = await passRepo.getWithCustomerAndMerchantBySerial(supabase, serial);
+    if (!bundle) {
+      return NextResponse.json(
+        { error: 'PASS_NOT_FOUND', message: 'Pase no encontrado' },
+        { status: 404, headers: rateLimit.headers }
+      );
     }
 
-    const record = await resolveRecord(serial, customerName, phone, currentStamps);
-    const saveUrl = await generateGoogleWalletSaveUrl(record.customer, record.pass);
+    const saveUrl = await generateGoogleWalletSaveUrl(
+      bundle.customer,
+      bundle.pass,
+      bundle.merchant,
+      bundle.locations,
+      req.nextUrl.origin
+    );
 
-    return NextResponse.json({
-      success: true,
-      serialNumber: serial,
-      saveUrl,
-    });
+    return NextResponse.json(
+      {
+        success: true,
+        serialNumber: bundle.pass.pass_serial_number,
+        saveUrl,
+      },
+      { status: 200, headers: rateLimit.headers }
+    );
   } catch (err: unknown) {
-    const message = err instanceof Error ? err.message : 'Error al generar enlace de Google Wallet';
-    return NextResponse.json({ error: message }, { status: 500 });
+    const message =
+      err instanceof Error ? err.message : 'Error al generar enlace de Google Wallet';
+    return NextResponse.json({ error: 'GOOGLE_SAVE_URL_FAILED', message }, { status: 500 });
   }
 }
 
 export async function GET(req: NextRequest) {
-  const { searchParams } = new URL(req.url);
-  const serial = searchParams.get('serial');
-  const customerName = searchParams.get('name') || 'Cliente VIP Canelo';
-  const stampsParam = searchParams.get('stamps');
-  const currentStamps = stampsParam ? parseInt(stampsParam, 10) : 1;
-  const phone = searchParams.get('phone') || '+573000000000';
+  const rateLimit = applyRateLimit(req, 'wallet:google:save-url', {
+    limit: 60,
+    windowMs: 60_000,
+  });
+  if (!rateLimit.allowed) {
+    return rateLimit.response;
+  }
 
-  if (!serial) {
-    return NextResponse.json({ error: 'Número de serial requerido' }, { status: 400 });
+  const parsed = parseSearchParams(req.url, SaveUrlQuerySchema);
+  if (!parsed.success) {
+    return parsed.response;
+  }
+
+  if (!isGoogleWalletConfigured()) {
+    return NextResponse.json(
+      {
+        error: 'WALLET_NOT_CONFIGURED',
+        message: 'Google Wallet no está configurado en el servidor.',
+      },
+      { status: 503, headers: rateLimit.headers }
+    );
   }
 
   try {
-    const record = await resolveRecord(serial, customerName, phone, currentStamps);
-    const saveUrl = await generateGoogleWalletSaveUrl(record.customer, record.pass);
+    const supabase = getSupabaseAdmin();
+    const bundle = await passRepo.getWithCustomerAndMerchantBySerial(supabase, parsed.data.serial);
+    if (!bundle) {
+      return NextResponse.json(
+        { error: 'PASS_NOT_FOUND', message: 'Pase no encontrado' },
+        { status: 404, headers: rateLimit.headers }
+      );
+    }
+
+    const saveUrl = await generateGoogleWalletSaveUrl(
+      bundle.customer,
+      bundle.pass,
+      bundle.merchant,
+      bundle.locations,
+      req.nextUrl.origin
+    );
     return NextResponse.redirect(saveUrl);
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : 'Error al redirigir a Google Wallet';
-    return NextResponse.json({ error: message }, { status: 500 });
+    return NextResponse.json({ error: 'GOOGLE_SAVE_URL_FAILED', message }, { status: 500 });
   }
 }

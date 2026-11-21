@@ -1,10 +1,11 @@
 'use client';
 
-import React, { useState } from 'react';
-import { Receipt, DollarSign, Gift, ShieldAlert, Sparkles, X, Crown, Percent, CheckCircle2 } from 'lucide-react';
+import React, { useEffect, useState } from 'react';
+import { Receipt, Gift, Sparkles, X, Crown, Percent } from 'lucide-react';
 import { Button } from '@/components/ui/Button';
 import { formatCurrency, cn } from '@/lib/utils';
-import { getStore, getTierMeta, calculateCustomerTier } from '@/lib/store/fidelizia-store';
+import { getTierMeta } from '@/lib/store/fidelizia-store';
+import type { LoyaltyTier } from '@/types/domain';
 
 interface TicketInputDialogProps {
   isOpen: boolean;
@@ -14,6 +15,12 @@ interface TicketInputDialogProps {
   onTriggerRedeem: () => void;
   isRewardReady?: boolean;
   rewardDescription?: string;
+  customerName?: string;
+  loyaltyTier?: LoyaltyTier;
+  discountPercentage?: number | null;
+  customReward?: string | null;
+  currentStamps?: number;
+  stampsNeeded?: number;
   isProcessing?: boolean;
 }
 
@@ -25,21 +32,28 @@ export function TicketInputDialog({
   onTriggerRedeem,
   isRewardReady = false,
   rewardDescription = 'Recompensa acumulada',
+  customerName,
+  loyaltyTier = 'bronze',
+  discountPercentage = 0,
+  customReward = null,
+  currentStamps,
+  stampsNeeded,
   isProcessing = false,
 }: TicketInputDialogProps) {
-  const store = getStore();
   const [ticketNumber, setTicketNumber] = useState('');
   const [amount, setAmount] = useState<string>('');
 
+  useEffect(() => {
+    if (!isOpen) {
+      setTicketNumber('');
+      setAmount('');
+    }
+  }, [isOpen]);
+
   if (!isOpen) return null;
 
-  // Buscar cliente y pase en el store
-  const pass = store.passes.find((p) => p.pass_serial_number === serialNumber);
-  const customer = pass ? store.customers.find((c) => c.id === pass.customer_id) : null;
-  const currentTier = customer?.loyalty_tier || calculateCustomerTier(pass?.total_rewards_redeemed || 0, store.merchant.tier_config);
-  const tierMeta = getTierMeta(currentTier);
-
-  const discountPercent = customer?.discount_percentage || 0;
+  const tierMeta = getTierMeta(loyaltyTier);
+  const discountPercent = discountPercentage || 0;
   const numAmount = parseFloat(amount) || 0;
   const discountAmount = discountPercent > 0 ? Math.round(numAmount * (discountPercent / 100)) : 0;
   const finalAmount = numAmount > 0 ? numAmount - discountAmount : 0;
@@ -55,10 +69,12 @@ export function TicketInputDialog({
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-md animate-in fade-in duration-200">
-      <div className="w-full max-w-sm bg-surface-200 border border-white/10 shadow-doppelrand rounded-xl p-5 text-left relative">
+      <div className="w-full max-w-sm max-h-[90vh] overflow-y-auto custom-scrollbar bg-surface-200 border border-white/10 shadow-doppelrand rounded-xl p-5 text-left relative">
         <button
+          type="button"
           onClick={onClose}
-          className="absolute top-4 right-4 text-zinc-400 hover:text-white transition-colors"
+          aria-label="Cerrar diálogo de ticket"
+          className="absolute top-4 right-4 p-1 text-zinc-400 hover:text-white rounded-md hover:bg-white/5 transition-colors"
         >
           <X className="w-4 h-4" />
         </button>
@@ -68,22 +84,26 @@ export function TicketInputDialog({
             <Receipt className="w-4 h-4 text-brand-400" />
           </div>
           <div>
-            <h3 className="text-sm font-bold text-white tracking-tight">Registrar Visita & Factura</h3>
+            <h3 className="text-sm font-bold text-white tracking-tight">Registrar Visita &amp; Factura</h3>
             <span className="text-[10px] font-mono text-zinc-400">{serialNumber}</span>
           </div>
         </div>
 
-        {/* Ficha Resumen del Cliente Identificado */}
-        {customer && (
+        {customerName && (
           <div className="mb-3.5 p-3 rounded-lg bg-surface-100 border border-white/5 space-y-2">
-            <div className="flex items-center justify-between">
-              <div>
+            <div className="flex items-center justify-between gap-2">
+              <div className="min-w-0">
                 <span className="text-[10px] font-mono text-zinc-400 uppercase tracking-wider block">Cliente</span>
-                <span className="text-xs font-bold text-white">{customer.full_name}</span>
+                <span className="text-xs font-bold text-white truncate block">{customerName}</span>
+                {typeof currentStamps === 'number' && typeof stampsNeeded === 'number' && (
+                  <span className="text-[10px] font-mono text-zinc-400">
+                    {currentStamps} / {stampsNeeded} sellos actuales
+                  </span>
+                )}
               </div>
               <div
                 className={cn(
-                  'inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-mono font-bold uppercase tracking-wider border',
+                  'inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-mono font-bold uppercase tracking-wider border shrink-0',
                   tierMeta.bgColor,
                   tierMeta.color,
                   tierMeta.borderColor
@@ -94,33 +114,34 @@ export function TicketInputDialog({
               </div>
             </div>
 
-            {/* Beneficios VIP asignados */}
-            <div className="flex flex-wrap gap-1.5 pt-1 border-t border-white/5">
-              {discountPercent > 0 && (
-                <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-emerald-500/20 text-emerald-300 text-[10px] font-mono font-bold">
-                  <Percent className="w-2.5 h-2.5" />
-                  {discountPercent}% OFF Permanente
-                </span>
-              )}
-              {customer.custom_reward && (
-                <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-champagne/15 text-champagne-light text-[10px] font-mono">
-                  <Gift className="w-2.5 h-2.5" />
-                  {customer.custom_reward}
-                </span>
-              )}
-            </div>
+            {(discountPercent > 0 || customReward) && (
+              <div className="flex flex-wrap gap-1.5 pt-1 border-t border-white/5">
+                {discountPercent > 0 && (
+                  <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-emerald-500/20 text-emerald-300 text-[10px] font-mono font-bold">
+                    <Percent className="w-2.5 h-2.5" />
+                    {discountPercent}% OFF Permanente
+                  </span>
+                )}
+                {customReward && (
+                  <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-champagne/15 text-champagne-light text-[10px] font-mono">
+                    <Gift className="w-2.5 h-2.5" />
+                    {customReward}
+                  </span>
+                )}
+              </div>
+            )}
           </div>
         )}
 
-        {/* Si el cliente califica para canjear premio */}
         {isRewardReady && (
           <div className="mb-4 p-3 bg-gradient-to-r from-champagne/15 to-amber-500/10 border border-champagne/30 rounded-lg">
             <div className="flex items-start gap-2">
               <Gift className="w-4 h-4 text-champagne shrink-0 mt-0.5" />
-              <div>
+              <div className="flex-1">
                 <p className="text-xs font-bold text-champagne-light">¡Meta de Sellos Completada!</p>
                 <p className="text-[11px] text-zinc-300 mt-0.5">{rewardDescription}</p>
                 <Button
+                  type="button"
                   variant="champagne"
                   size="sm"
                   onClick={onTriggerRedeem}
@@ -136,10 +157,11 @@ export function TicketInputDialog({
 
         <form onSubmit={handleSubmit} className="space-y-3.5">
           <div>
-            <label className="text-xs font-mono text-zinc-300 block mb-1">
+            <label htmlFor="pos-ticket-number" className="text-xs font-mono text-zinc-300 block mb-1">
               Número de Ticket / Factura * (Candado Antifraude)
             </label>
             <input
+              id="pos-ticket-number"
               type="text"
               required
               value={ticketNumber}
@@ -153,12 +175,13 @@ export function TicketInputDialog({
           </div>
 
           <div>
-            <label className="text-xs font-mono text-zinc-300 block mb-1">
+            <label htmlFor="pos-ticket-amount" className="text-xs font-mono text-zinc-300 block mb-1">
               Monto Consumido COP (Opcional)
             </label>
             <div className="relative">
               <span className="absolute left-3 top-2 text-zinc-500 text-sm">$</span>
               <input
+                id="pos-ticket-amount"
                 type="number"
                 value={amount}
                 onChange={(e) => setAmount(e.target.value)}
@@ -169,7 +192,6 @@ export function TicketInputDialog({
               />
             </div>
 
-            {/* Desglose Reactivo de Descuento si aplica */}
             {discountPercent > 0 && numAmount > 0 && (
               <div className="mt-2 p-2 rounded bg-emerald-500/10 border border-emerald-500/20 text-[11px] font-mono space-y-0.5">
                 <div className="flex justify-between text-zinc-400">

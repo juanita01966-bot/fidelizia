@@ -1,7 +1,7 @@
 'use client';
 
-import React, { useState } from 'react';
-import { Lock, Delete, ArrowRight, ShieldAlert } from 'lucide-react';
+import React, { useEffect, useState } from 'react';
+import { Lock, Delete, ShieldAlert, X } from 'lucide-react';
 import { soundEngine } from '@/lib/audio/sound-effects';
 import { cn } from '@/lib/utils';
 
@@ -16,6 +16,7 @@ interface PinPadModalProps {
   onClose?: () => void;
   error?: string | null;
   errorMessage?: string | null;
+  isSubmitting?: boolean;
 }
 
 export function PinPadModal({
@@ -29,16 +30,35 @@ export function PinPadModal({
   onClose,
   error,
   errorMessage,
+  isSubmitting = false,
 }: PinPadModalProps) {
   const [pin, setPin] = useState('');
 
-  const effectiveSubtitle = subtitle || description || 'Ingresa tu PIN personal de 4 dígitos para habilitar el escáner';
+  const effectiveSubtitle =
+    subtitle || description || 'Ingresa tu PIN personal de 4 dígitos para habilitar el escáner';
   const effectiveError = error || errorMessage;
+
+  useEffect(() => {
+    if (!isOpen || effectiveError) {
+      setPin('');
+    }
+  }, [isOpen, effectiveError]);
+
+  useEffect(() => {
+    if (!isOpen || pin.length < 4 || isSubmitting) return;
+    const timer = setTimeout(() => {
+      setPin('');
+    }, 350);
+    return () => clearTimeout(timer);
+  }, [isOpen, pin, isSubmitting]);
+
   const handleSuccess = (completedPin: string) => {
     if (onSuccess) onSuccess(completedPin);
     if (onSubmit) onSubmit(completedPin);
   };
+
   const handleClose = () => {
+    setPin('');
     if (onCancel) onCancel();
     if (onClose) onClose();
   };
@@ -46,33 +66,37 @@ export function PinPadModal({
   if (!isOpen) return null;
 
   const handleDigit = (digit: string) => {
-    if (pin.length < 4) {
-      const nextPin = pin + digit;
-      setPin(nextPin);
-      soundEngine.playScanSuccess();
-      if (nextPin.length === 4) {
-        handleSuccess(nextPin);
-      }
+    if (isSubmitting) return;
+    const base = pin.length >= 4 ? '' : pin;
+    const nextPin = base + digit;
+    setPin(nextPin);
+    soundEngine.playScanSuccess();
+    if (nextPin.length === 4) {
+      handleSuccess(nextPin);
     }
   };
 
   const handleDelete = () => {
+    if (isSubmitting) return;
     setPin((prev) => prev.slice(0, -1));
   };
 
   const handleClear = () => {
+    if (isSubmitting) return;
     setPin('');
   };
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-md animate-in fade-in duration-200">
-      <div className="w-full max-w-xs bg-surface-200 border border-white/10 shadow-doppelrand rounded-xl p-6 text-center relative">
+      <div className="w-full max-w-xs max-h-[90vh] overflow-y-auto custom-scrollbar bg-surface-200 border border-white/10 shadow-doppelrand rounded-xl p-6 text-center relative">
         {(onCancel || onClose) && (
           <button
+            type="button"
             onClick={handleClose}
-            className="absolute top-3 right-3 text-zinc-400 hover:text-white text-xs font-mono"
+            aria-label="Cerrar teclado de PIN"
+            className="absolute top-3 right-3 p-1 text-zinc-400 hover:text-white rounded-md hover:bg-white/5 transition-colors"
           >
-            ✕
+            <X className="w-4 h-4" />
           </button>
         )}
         <div className="w-12 h-12 rounded-full bg-purple-500/10 border border-purple-500/30 flex items-center justify-center mx-auto mb-3">
@@ -82,7 +106,6 @@ export function PinPadModal({
         <h3 className="text-base font-bold text-white tracking-tight">{title}</h3>
         <p className="text-xs text-zinc-400 mt-1 mb-5">{effectiveSubtitle}</p>
 
-        {/* Círculos de dígitos */}
         <div className="flex justify-center gap-3 mb-6">
           {[0, 1, 2, 3].map((idx) => (
             <div
@@ -104,40 +127,50 @@ export function PinPadModal({
           </div>
         )}
 
-        {/* Teclado numérico */}
         <div className="grid grid-cols-3 gap-2.5 max-w-[240px] mx-auto">
           {['1', '2', '3', '4', '5', '6', '7', '8', '9'].map((d) => (
             <button
               key={d}
+              type="button"
+              disabled={isSubmitting}
               onClick={() => handleDigit(d)}
-              className="h-13 aspect-square rounded-lg bg-surface-100 hover:bg-surface-50 border border-white/5 active:scale-95 text-xl font-mono font-medium text-white transition-all flex items-center justify-center shadow-sm"
+              className="h-13 w-full rounded-lg bg-surface-100 hover:bg-surface-50 border border-white/5 active:scale-95 text-xl font-mono font-medium text-white transition-all flex items-center justify-center shadow-sm disabled:opacity-50"
             >
               {d}
             </button>
           ))}
           <button
+            type="button"
+            disabled={isSubmitting}
             onClick={handleClear}
-            className="h-13 rounded-lg bg-transparent hover:bg-white/5 text-xs text-zinc-400 font-mono flex items-center justify-center"
+            aria-label="Limpiar PIN"
+            className="h-13 w-full rounded-lg bg-surface-100/40 hover:bg-white/5 border border-white/5 text-xs text-zinc-400 font-mono flex items-center justify-center disabled:opacity-50"
           >
             C
           </button>
           <button
+            type="button"
+            disabled={isSubmitting}
             onClick={() => handleDigit('0')}
-            className="h-13 aspect-square rounded-lg bg-surface-100 hover:bg-surface-50 border border-white/5 active:scale-95 text-xl font-mono font-medium text-white transition-all flex items-center justify-center shadow-sm"
+            className="h-13 w-full rounded-lg bg-surface-100 hover:bg-surface-50 border border-white/5 active:scale-95 text-xl font-mono font-medium text-white transition-all flex items-center justify-center shadow-sm disabled:opacity-50"
           >
             0
           </button>
           <button
+            type="button"
+            disabled={isSubmitting}
             onClick={handleDelete}
-            className="h-13 rounded-lg bg-surface-100 hover:bg-surface-50 border border-white/5 active:scale-95 text-zinc-300 flex items-center justify-center"
+            aria-label="Borrar último dígito"
+            className="h-13 w-full rounded-lg bg-surface-100 hover:bg-surface-50 border border-white/5 active:scale-95 text-zinc-300 flex items-center justify-center disabled:opacity-50"
           >
             <Delete className="w-5 h-5" />
           </button>
         </div>
 
-        {onCancel && (
+        {(onCancel || onClose) && (
           <button
-            onClick={onCancel}
+            type="button"
+            onClick={handleClose}
             className="mt-5 text-xs text-zinc-500 hover:text-zinc-300 transition-colors"
           >
             Cancelar

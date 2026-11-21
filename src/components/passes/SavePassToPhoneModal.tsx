@@ -1,17 +1,16 @@
 'use client';
 
-import React, { useState } from 'react';
-import { 
-  Smartphone, 
-  Share2, 
-  PlusSquare, 
-  Bell, 
-  CheckCircle2, 
-  MessageSquare, 
-  X, 
-  ArrowRight,
+import React, { useEffect, useState } from 'react';
+import {
+  Smartphone,
+  Share2,
+  PlusSquare,
+  Bell,
+  CheckCircle2,
+  MessageSquare,
+  X,
   Sparkles,
-  Download
+  Download,
 } from 'lucide-react';
 import { Button } from '@/components/ui/Button';
 import { requestPushPermissionAndSendWelcome, generateWhatsAppPassLink } from '@/lib/pwa/pwa-helper';
@@ -33,14 +32,19 @@ export function SavePassToPhoneModal({
   merchantName,
 }: SavePassToPhoneModalProps) {
   const [activeTab, setActiveTab] = useState<'install' | 'notifications' | 'whatsapp'>('install');
-  const [notificationsGranted, setNotificationsGranted] = useState(
-    typeof window !== 'undefined' && 'Notification' in window && Notification.permission === 'granted'
-  );
+  const [notificationsGranted, setNotificationsGranted] = useState(false);
+  const [isIos, setIsIos] = useState(false);
   const [isRequestingNotification, setIsRequestingNotification] = useState(false);
 
-  if (!isOpen) return null;
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    if ('Notification' in window) {
+      setNotificationsGranted(Notification.permission === 'granted');
+    }
+    setIsIos(/iphone|ipad|ipod/.test(navigator.userAgent.toLowerCase()));
+  }, []);
 
-  const isIos = typeof window !== 'undefined' && /iphone|ipad|ipod/.test(navigator.userAgent.toLowerCase());
+  if (!isOpen) return null;
 
   const handleActivateNotifications = async () => {
     setIsRequestingNotification(true);
@@ -63,34 +67,35 @@ export function SavePassToPhoneModal({
 
   const handleShareWhatsApp = () => {
     const link = generateWhatsAppPassLink(merchantName, customerName, serialNumber);
-    window.open(link, '_blank');
+    window.open(link, '_blank', 'noopener,noreferrer');
   };
 
   return (
     <div className="fixed inset-0 z-50 bg-black/90 backdrop-blur-md flex items-center justify-center p-4 animate-in fade-in duration-200 text-left">
-      <div className="bg-surface-200 border border-white/10 rounded-2xl w-full max-w-md overflow-hidden shadow-2xl relative">
-        {/* Header con botón de cerrar */}
-        <div className="p-4 border-b border-white/[0.08] flex items-center justify-between bg-surface-100/60">
+      <div className="bg-surface-200 border border-white/10 rounded-2xl w-full max-w-md max-h-[90vh] overflow-y-auto custom-scrollbar shadow-2xl relative">
+        <div className="p-4 border-b border-white/[0.08] flex items-center justify-between bg-surface-100/60 sticky top-0 z-10 backdrop-blur-md">
           <div className="flex items-center gap-2">
             <div className="w-8 h-8 rounded-lg bg-brand-500/20 border border-brand-500/30 flex items-center justify-center text-brand-400">
               <Smartphone className="w-4 h-4" />
             </div>
             <div>
               <h3 className="text-sm font-bold text-white tracking-tight">Guardar Tarjeta en tu Celular</h3>
-              <p className="text-[11px] text-zinc-400">Acceso permanente & Notificaciones</p>
+              <p className="text-[11px] text-zinc-400">Acceso permanente &amp; Notificaciones</p>
             </div>
           </div>
           <button
+            type="button"
             onClick={onClose}
+            aria-label="Cerrar modal"
             className="p-1.5 text-zinc-400 hover:text-white rounded-lg hover:bg-white/10 transition-colors"
           >
             <X className="w-5 h-5" />
           </button>
         </div>
 
-        {/* Tabs de Selección */}
         <div className="grid grid-cols-3 border-b border-white/[0.08] bg-surface-100/30 text-xs font-mono">
           <button
+            type="button"
             onClick={() => setActiveTab('install')}
             className={`py-2.5 px-3 flex items-center justify-center gap-1.5 border-b-2 transition-all ${
               activeTab === 'install'
@@ -102,6 +107,7 @@ export function SavePassToPhoneModal({
             <span>1. Instalar</span>
           </button>
           <button
+            type="button"
             onClick={() => setActiveTab('notifications')}
             className={`py-2.5 px-3 flex items-center justify-center gap-1.5 border-b-2 transition-all ${
               activeTab === 'notifications'
@@ -113,6 +119,7 @@ export function SavePassToPhoneModal({
             <span>2. Avisos</span>
           </button>
           <button
+            type="button"
             onClick={() => setActiveTab('whatsapp')}
             className={`py-2.5 px-3 flex items-center justify-center gap-1.5 border-b-2 transition-all ${
               activeTab === 'whatsapp'
@@ -125,7 +132,6 @@ export function SavePassToPhoneModal({
           </button>
         </div>
 
-        {/* Contenido según Tab */}
         <div className="p-5 space-y-4">
           {activeTab === 'install' && (
             <div className="space-y-4">
@@ -140,7 +146,6 @@ export function SavePassToPhoneModal({
               </div>
 
               {isIos ? (
-                /* Pasos para iPhone / Safari */
                 <div className="space-y-3 bg-surface-100/70 p-4 rounded-xl border border-white/5">
                   <div className="text-xs font-semibold text-white mb-2 flex items-center gap-1.5">
                     <span className="w-2 h-2 rounded-full bg-blue-400" />
@@ -151,7 +156,8 @@ export function SavePassToPhoneModal({
                       1
                     </div>
                     <div>
-                      Toca el botón <strong className="text-white font-semibold">Compartir</strong> <Share2 className="w-3.5 h-3.5 inline mx-1 text-blue-400" /> en la barra inferior de Safari.
+                      Toca el botón <strong className="text-white font-semibold">Compartir</strong>{' '}
+                      <Share2 className="w-3.5 h-3.5 inline mx-1 text-blue-400" /> en la barra inferior de Safari.
                     </div>
                   </div>
                   <div className="flex items-start gap-3 text-xs text-zinc-300">
@@ -159,7 +165,9 @@ export function SavePassToPhoneModal({
                       2
                     </div>
                     <div>
-                      Desliza hacia abajo y selecciona <strong className="text-white font-semibold">"Agregar a inicio"</strong> <PlusSquare className="w-3.5 h-3.5 inline mx-1 text-emerald-400" />.
+                      Desliza hacia abajo y selecciona{' '}
+                      <strong className="text-white font-semibold">&quot;Agregar a inicio&quot;</strong>{' '}
+                      <PlusSquare className="w-3.5 h-3.5 inline mx-1 text-emerald-400" />.
                     </div>
                   </div>
                   <div className="flex items-start gap-3 text-xs text-zinc-300">
@@ -167,12 +175,11 @@ export function SavePassToPhoneModal({
                       3
                     </div>
                     <div>
-                      Toca <strong className="text-white font-semibold">"Agregar"</strong> arriba a la derecha. ¡Tu tarjeta quedará guardada como una app!
+                      Toca <strong className="text-white font-semibold">&quot;Agregar&quot;</strong> arriba a la derecha. ¡Tu tarjeta de {merchantName} quedará guardada como una app!
                     </div>
                   </div>
                 </div>
               ) : (
-                /* Pasos para Android / Chrome */
                 <div className="space-y-3 bg-surface-100/70 p-4 rounded-xl border border-white/5">
                   <div className="text-xs font-semibold text-white mb-2 flex items-center gap-1.5">
                     <span className="w-2 h-2 rounded-full bg-emerald-400" />
@@ -191,7 +198,8 @@ export function SavePassToPhoneModal({
                       2
                     </div>
                     <div>
-                      Selecciona <strong className="text-white font-semibold">"Instalar aplicación"</strong> o <strong className="text-white font-semibold">"Agregar a la pantalla principal"</strong>.
+                      Selecciona <strong className="text-white font-semibold">&quot;Instalar aplicación&quot;</strong> o{' '}
+                      <strong className="text-white font-semibold">&quot;Agregar a la pantalla principal&quot;</strong>.
                     </div>
                   </div>
                   <div className="flex items-start gap-3 text-xs text-zinc-300">
@@ -199,7 +207,7 @@ export function SavePassToPhoneModal({
                       3
                     </div>
                     <div>
-                      Confirma <strong className="text-white font-semibold">"Instalar"</strong>. ¡El ícono de Café Canelo aparecerá en tu teléfono!
+                      Confirma <strong className="text-white font-semibold">&quot;Instalar&quot;</strong>. ¡El ícono de {merchantName} aparecerá en tu teléfono!
                     </div>
                   </div>
                 </div>
@@ -215,7 +223,7 @@ export function SavePassToPhoneModal({
                   <strong className="text-white block font-medium mb-0.5">
                     Notificaciones en tu Pantalla de Bloqueo
                   </strong>
-                  Recibe avisos automáticos cada vez que acumules un sello en caja, cuando tu café gratis esté listo, o promociones 2x1 exclusivas.
+                  Recibe avisos automáticos cada vez que acumules un sello en caja, cuando tu recompensa esté lista o promociones exclusivas.
                 </div>
               </div>
 
@@ -255,7 +263,7 @@ export function SavePassToPhoneModal({
                   <strong className="text-white block font-medium mb-0.5">
                     Respaldo Seguro en tu WhatsApp
                   </strong>
-                  Enviate el enlace directo de tu tarjeta a tu propio chat de WhatsApp o mensajes guardados. Así nunca la perderás aunque cambies de celular.
+                  Envíate el enlace directo de tu tarjeta a tu propio chat de WhatsApp o mensajes guardados. Así nunca la perderás aunque cambies de celular.
                 </div>
               </div>
 
@@ -278,10 +286,10 @@ export function SavePassToPhoneModal({
           )}
         </div>
 
-        {/* Footer del Modal */}
         <div className="p-3 border-t border-white/[0.08] bg-surface-100/80 flex items-center justify-between text-[11px] text-zinc-400">
-          <span>{merchantName} · Sistema Local-First</span>
+          <span>{merchantName} · Fidelizia</span>
           <button
+            type="button"
             onClick={onClose}
             className="text-brand-300 hover:text-white font-medium"
           >

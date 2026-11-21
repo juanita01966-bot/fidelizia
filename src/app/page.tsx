@@ -1,48 +1,53 @@
 'use client';
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import Link from 'next/link';
-import { 
-  Sparkles, 
-  Smartphone, 
-  CheckCircle2, 
-  Gift, 
-  ShieldCheck, 
-  ArrowRight,
-  Download,
-  Lock,
-  QrCode,
+import {
+  Sparkles,
+  CheckCircle2,
+  Gift,
   Maximize2,
   X,
-  Copy,
-  Bell,
   MessageSquare,
   Search,
-  RefreshCw,
-  Share2
+  Download,
+  Smartphone,
 } from 'lucide-react';
 import { Button } from '@/components/ui/Button';
 import { LivePassPreview } from '@/components/passes/LivePassPreview';
 import { GoogleWalletSaveModal } from '@/components/passes/GoogleWalletSaveModal';
 import { SavePassToPhoneModal } from '@/components/passes/SavePassToPhoneModal';
 import { PremioDesbloqueadoModal } from '@/components/passes/PremioDesbloqueadoModal';
-import { 
-  registerServiceWorker, 
-  saveActivePassSerial, 
-  getActivePassSerial, 
+import {
+  registerServiceWorker,
+  saveActivePassSerial,
+  getActivePassSerial,
   clearActivePassSerial,
-  generateWhatsAppPassLink 
+  generateWhatsAppPassLink,
 } from '@/lib/pwa/pwa-helper';
-import { getStore, calculateCustomerTier } from '@/lib/store/fidelizia-store';
+import { INITIAL_MERCHANT } from '@/lib/store/fidelizia-store';
 import { getSessionManager } from '@/lib/store/auth-session';
 import { AdminLogin } from '@/components/dashboard/AdminLogin';
 import { UnifiedDashboard } from '@/components/dashboard/UnifiedDashboard';
 import { PosScanWorkspace } from '@/components/scanner/PosScanWorkspace';
 import { soundEngine } from '@/lib/audio/sound-effects';
+import type { LoyaltyTier, Merchant } from '@/types/domain';
 import confetti from 'canvas-confetti';
 import { toast } from 'sonner';
 
-function GoogleColorIcon({ className = "w-5 h-5" }: { className?: string }) {
+interface RegisteredCardState {
+  customerName: string;
+  serialNumber: string;
+  currentStamps: number;
+  stampsNeeded: number;
+  passType: 'apple' | 'google';
+  loyaltyTier: LoyaltyTier;
+  totalRewardsRedeemed: number;
+  customReward: string | null;
+  discountPercentage: number | null;
+}
+
+function GoogleColorIcon({ className = 'w-5 h-5' }: { className?: string }) {
   return (
     <svg className={className} viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
       <path
@@ -65,19 +70,28 @@ function GoogleColorIcon({ className = "w-5 h-5" }: { className?: string }) {
   );
 }
 
+function normalizePhoneE164(raw: string): string {
+  const trimmed = raw.trim();
+  if (trimmed.startsWith('+')) {
+    return `+${trimmed.slice(1).replace(/\D/g, '')}`;
+  }
+  const digits = trimmed.replace(/\D/g, '');
+  return `+57${digits}`;
+}
+
 export default function HomePage() {
-  const store = getStore();
   const sessionManager = getSessionManager();
 
+  const [merchant, setMerchant] = useState<Merchant>(INITIAL_MERCHANT);
   const [hash, setHash] = useState<string>('');
   const [isMounted, setIsMounted] = useState(false);
   const [session, setSession] = useState(sessionManager.getSession());
+  const [isIosDevice, setIsIosDevice] = useState(false);
 
-  // Modo del Formulario: 'create' (nuevo) o 'recover' (ya tengo tarjeta)
   const [formMode, setFormMode] = useState<'create' | 'recover'>('create');
   const [recoverPhone, setRecoverPhone] = useState('');
+  const [isSubmitting, setIsSubmitting] = useState(false);
 
-  // Estado del Formulario de Onboarding Cliente (Inicia Limpio y Genérico)
   const [fullName, setFullName] = useState('');
   const [phone, setPhone] = useState('');
   const [birthdate, setBirthdate] = useState('');
@@ -88,50 +102,80 @@ export default function HomePage() {
   const [showMobilePassModal, setShowMobilePassModal] = useState(false);
   const [showGoogleWalletModal, setShowGoogleWalletModal] = useState(false);
   const [showSaveToPhoneModal, setShowSaveToPhoneModal] = useState(false);
-  const [registeredData, setRegisteredData] = useState<{
-    customerName: string;
-    serialNumber: string;
-    currentStamps: number;
-  } | null>(null);
+  const [registeredData, setRegisteredData] = useState<RegisteredCardState | null>(null);
 
-  // Estado para el Modal de Premio Desbloqueado en Vivo
   const [showPrizeUnlockedModal, setShowPrizeUnlockedModal] = useState(false);
   const [unlockedPrizeData, setUnlockedPrizeData] = useState<{
     reward: string;
     stamps: number;
   } | null>(null);
-  const [hasAlertedPrize, setHasAlertedPrize] = useState(false);
+  const hasAlertedPrizeRef = useRef(false);
+  const registeredDataRef = useRef<RegisteredCardState | null>(null);
 
-  // Escuchar Hash en URL (#/dsb o #/admin) e inicializar PWA Local-First
+  useEffect(() => {
+    registeredDataRef.current = registeredData;
+  }, [registeredData]);
+
   useEffect(() => {
     setIsMounted(true);
-
-    // 1. Inicializar Service Worker para PWA y Notificaciones Push
     registerServiceWorker();
 
-    // 2. Local-First: Verificar si hay una tarjeta guardada en este teléfono o en la URL
+    const iosDetected =
+      typeof navigator !== 'undefined' &&
+      /iphone|ipad|ipod/.test(navigator.userAgent.toLowerCase());
+    setIsIosDevice(iosDetected);
+    setSelectedPassType(iosDetected ? 'apple' : 'google');
+
+    const controller = new AbortController();
+
+    fetch('/api/v1/merchant/settings?slug=cafe-canelo', {
+      signal: controller.signal,
+      cache: 'no-store',
+    })
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data) => {
+        if (data?.merchant) {
+          setMerchant(data.merchant as Merchant);
+        }
+      })
+      .catch(() => {
+        // Ignore abort / network errors on initial public config load
+      });
+
     try {
       const searchParams = new URLSearchParams(window.location.search);
       const urlSerial = searchParams.get('serial');
       const activeSerial = urlSerial || getActivePassSerial();
 
       if (activeSerial) {
-        const foundPass = store.passes.find((p) => p.pass_serial_number === activeSerial);
-        if (foundPass) {
-          const customer = store.customers.find((c) => c.id === foundPass.customer_id);
-          if (customer) {
+        fetch(`/api/v1/passes/status?serial=${encodeURIComponent(activeSerial)}`, {
+          signal: controller.signal,
+          cache: 'no-store',
+        })
+          .then((res) => (res.ok ? res.json() : null))
+          .then((data) => {
+            if (!data?.serial) return;
             setRegisteredData({
-              customerName: customer.full_name,
-              serialNumber: foundPass.pass_serial_number,
-              currentStamps: foundPass.current_stamps || 1,
+              customerName: data.customerName,
+              serialNumber: data.serial,
+              currentStamps: data.currentStamps ?? 1,
+              stampsNeeded: data.stampsNeeded ?? 10,
+              passType: data.passType === 'apple' ? 'apple' : 'google',
+              loyaltyTier: (data.loyaltyTier as LoyaltyTier) || 'bronze',
+              totalRewardsRedeemed: data.totalRewardsRedeemed ?? 0,
+              customReward: data.customReward ?? null,
+              discountPercentage: data.discountPercentage ?? null,
             });
+            setSelectedPassType(data.passType === 'apple' ? 'apple' : 'google');
             setIsRegistered(true);
-            saveActivePassSerial(foundPass.pass_serial_number);
-          }
-        }
+            saveActivePassSerial(data.serial);
+          })
+          .catch(() => {
+            // Keep clean onboarding form if serial no longer exists
+          });
       }
-    } catch (err) {
-      console.warn('Error reading stored pass:', err);
+    } catch {
+      // Ignore storage errors
     }
 
     const handleHashChange = () => {
@@ -145,48 +189,65 @@ export default function HomePage() {
       setSession(sessionManager.getSession());
     });
 
-    // Billetera Oficial Configurada: Google Wallet
-    setSelectedPassType('google');
-
     return () => {
+      controller.abort();
       window.removeEventListener('hashchange', handleHashChange);
       unsubSession();
     };
-  }, [sessionManager, store]);
+  }, [sessionManager]);
 
-  // Sincronización Reactiva en Tiempo Real de Sellos y Premios (Polling cada 2.5s)
+  const activeSerial = registeredData?.serialNumber || null;
+
   useEffect(() => {
-    const serial = registeredData?.serialNumber || getActivePassSerial();
-    if (!serial) return;
+    if (!activeSerial) return;
 
     let isSubscribed = true;
+    let activeAbort: AbortController | null = null;
 
     const checkPassStatus = async () => {
+      activeAbort?.abort();
+      activeAbort = new AbortController();
       try {
-        const res = await fetch(`/api/v1/passes/status?serial=${encodeURIComponent(serial)}`, {
-          cache: 'no-store',
-        });
-        if (!res.ok) return;
+        const res = await fetch(
+          `/api/v1/passes/status?serial=${encodeURIComponent(activeSerial)}`,
+          { cache: 'no-store', signal: activeAbort.signal }
+        );
+        if (!res.ok || !isSubscribed) return;
         const data = await res.json();
-
         if (!isSubscribed) return;
 
-        // 1. Detección de Aumento de Sellos en Vivo
-        if (registeredData && data.currentStamps > registeredData.currentStamps) {
+        const currentState = registeredDataRef.current;
+        if (currentState && data.currentStamps > currentState.currentStamps) {
           soundEngine.playStampEarned();
           if (typeof window !== 'undefined' && 'vibrate' in navigator) {
-            try { navigator.vibrate([80, 40, 80]); } catch {}
+            try {
+              navigator.vibrate([80, 40, 80]);
+            } catch {
+              // ignore
+            }
           }
-          toast.success(`☕ ¡Nuevo sello registrado!`, {
-            description: `Llevas ${data.currentStamps}/${data.stampsNeeded} sellos acumulados en Café Canelo.`,
+          toast.success('¡Nuevo sello registrado!', {
+            description: `Llevas ${data.currentStamps}/${data.stampsNeeded} sellos acumulados en ${data.merchantName || merchant.name}.`,
           });
-          setRegisteredData((prev) => prev ? { ...prev, currentStamps: data.currentStamps } : null);
         }
 
-        // 2. Detección de Premio Desbloqueado en Vivo
+        setRegisteredData((prev) =>
+          prev
+            ? {
+                ...prev,
+                currentStamps: data.currentStamps ?? prev.currentStamps,
+                stampsNeeded: data.stampsNeeded ?? prev.stampsNeeded,
+                loyaltyTier: (data.loyaltyTier as LoyaltyTier) || prev.loyaltyTier,
+                totalRewardsRedeemed: data.totalRewardsRedeemed ?? prev.totalRewardsRedeemed,
+                customReward: data.customReward ?? prev.customReward,
+                discountPercentage: data.discountPercentage ?? prev.discountPercentage,
+              }
+            : prev
+        );
+
         if (data.rewardUnlocked) {
-          if (!hasAlertedPrize) {
-            setHasAlertedPrize(true);
+          if (!hasAlertedPrizeRef.current) {
+            hasAlertedPrizeRef.current = true;
             setUnlockedPrizeData({
               reward: data.rewardDescription,
               stamps: data.stampsNeeded,
@@ -194,29 +255,28 @@ export default function HomePage() {
             setShowPrizeUnlockedModal(true);
           }
         } else {
-          // Si los sellos fueron canjeados o bajaron de la meta, resetear bandera
-          if (hasAlertedPrize) {
-            setHasAlertedPrize(false);
-          }
+          hasAlertedPrizeRef.current = false;
         }
-      } catch (err) {
-        console.debug('Error in pass polling:', err);
+      } catch {
+        // Ignore polling errors / aborts
       }
     };
 
-    const interval = setInterval(checkPassStatus, 2500);
+    const interval = setInterval(() => {
+      void checkPassStatus();
+    }, 3000);
+
     return () => {
       isSubscribed = false;
+      activeAbort?.abort();
       clearInterval(interval);
     };
-  }, [registeredData, hasAlertedPrize]);
+  }, [activeSerial, merchant.name]);
 
-  // Si el usuario navegó a /#/scan -> Mostrar Escáner POS de Caja
   if (isMounted && hash === '#/scan') {
-    return <PosScanWorkspace />;
+    return <PosScanWorkspace merchantSlug={merchant.slug} />;
   }
 
-  // Si el usuario navegó a /#/dsb o /#/admin -> Mostrar Login / Dashboard Táctico
   if (isMounted && (hash === '#/dsb' || hash === '#/admin')) {
     if (!session.isAuthenticated) {
       return <AdminLogin onLoginSuccess={() => setSession(sessionManager.getSession())} />;
@@ -224,66 +284,67 @@ export default function HomePage() {
     return <UnifiedDashboard />;
   }
 
-  // Submit del Formulario de Registro Cliente (Nuevo Miembro)
-  const handleRegisterSubmit = (e: React.FormEvent) => {
+  const handleRegisterSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
 
-    if (!fullName.trim() || fullName.length < 3) {
-      toast.error('Ingresa tu nombre completo');
+    if (!termsAccepted) {
+      toast.error('Debes aceptar los términos y la política de privacidad para continuar');
       return;
     }
 
-    if (!phone.trim() || phone.length < 8) {
+    if (!fullName.trim() || fullName.trim().length < 3) {
+      toast.error('Ingresa tu nombre completo (mínimo 3 caracteres)');
+      return;
+    }
+
+    if (!phone.trim() || phone.replace(/\D/g, '').length < 7) {
       toast.error('Ingresa un número de WhatsApp válido');
       return;
     }
 
-    const formattedPhone = phone.startsWith('+') ? phone : `+57${phone.replace(/\D/g, '')}`;
+    const formattedPhone = normalizePhoneE164(phone);
+    setIsSubmitting(true);
 
     try {
-      const { customer, pass } = store.registerCustomer({
-        fullName: fullName.trim(),
-        phone: formattedPhone,
-        birthdate: birthdate || null,
-        passType: selectedPassType,
-      });
-
-      // Sincronizar en la base de datos central del servidor para que el POS lo reconozca
-      fetch('/api/v1/customers/register', {
+      const res = await fetch('/api/v1/customers/register', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          fullName: customer.full_name,
+          fullName: fullName.trim(),
           phone: formattedPhone,
           birthdate: birthdate || null,
           passType: selectedPassType,
-          serialNumber: pass.pass_serial_number,
+          merchantSlug: merchant.slug,
+          termsAccepted: true,
         }),
-      })
-        .then(async (res) => {
-          if (res.ok) {
-            const data = await res.json();
-            if (data.pass?.pass_serial_number && data.pass.pass_serial_number !== pass.pass_serial_number) {
-              saveActivePassSerial(data.pass.pass_serial_number);
-              setRegisteredData((prev) => prev ? { ...prev, serialNumber: data.pass.pass_serial_number } : prev);
-            }
-          }
-        })
-        .catch((e) => console.debug('Sync register error:', e));
+      });
 
-      // Anclar la tarjeta de forma permanente en este teléfono
-      saveActivePassSerial(pass.pass_serial_number);
+      const data = await res.json();
+      if (!res.ok || !data.success) {
+        toast.error('No se pudo crear tu tarjeta', {
+          description: data.message || 'Verifica los datos ingresados e intenta de nuevo.',
+        });
+        return;
+      }
+
+      const serial = data.pass.pass_serial_number as string;
+      saveActivePassSerial(serial);
 
       setRegisteredData({
-        customerName: customer.full_name,
-        serialNumber: pass.pass_serial_number,
-        currentStamps: pass.current_stamps || 1,
+        customerName: data.customer.full_name,
+        serialNumber: serial,
+        currentStamps: data.pass.current_stamps ?? 1,
+        stampsNeeded: data.merchant?.stamps_needed ?? merchant.stamps_needed,
+        passType: data.pass.pass_type === 'apple' ? 'apple' : 'google',
+        loyaltyTier: (data.customer.loyalty_tier as LoyaltyTier) || 'bronze',
+        totalRewardsRedeemed: data.customer.total_rewards_redeemed ?? 0,
+        customReward: data.customer.custom_reward ?? null,
+        discountPercentage: data.customer.discount_percentage ?? null,
       });
 
       setIsRegistered(true);
       soundEngine.playRedeemCelebration();
 
-      // Fanfarria visual de confeti
       confetti({
         particleCount: 90,
         spread: 70,
@@ -294,68 +355,114 @@ export default function HomePage() {
       toast.success('¡Tarjeta digital anclada a tu teléfono!', {
         description: 'Hemos guardado tu tarjeta y sumado tu primer sello de cortesía.',
       });
-    } catch (err: unknown) {
-      toast.error(err instanceof Error ? err.message : 'Error al registrar cliente');
+    } catch {
+      toast.error('Error de conexión al registrar tu tarjeta');
+    } finally {
+      setIsSubmitting(false);
     }
   };
 
-  // Submit de Recuperación de Tarjeta Existente por WhatsApp
-  const handleRecoverSubmit = (e: React.FormEvent) => {
+  const handleRecoverSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
 
-    if (!recoverPhone.trim()) {
+    if (!recoverPhone.trim() || recoverPhone.replace(/\D/g, '').length < 7) {
       toast.error('Ingresa tu número de WhatsApp registrado');
       return;
     }
 
-    const cleanInput = recoverPhone.replace(/\D/g, '');
-    const foundCustomer = store.customers.find((c) => {
-      const cleanCustomerPhone = c.phone.replace(/\D/g, '');
-      return cleanCustomerPhone.includes(cleanInput) || cleanInput.includes(cleanCustomerPhone);
-    });
+    const formattedPhone = normalizePhoneE164(recoverPhone);
+    setIsSubmitting(true);
 
-    if (!foundCustomer) {
-      toast.error('No encontramos ninguna tarjeta activa con ese número', {
-        description: 'Verifica tu número o regístrate en la pestaña "Nuevo Miembro".',
+    try {
+      const res = await fetch(
+        `/api/v1/passes/status?phone=${encodeURIComponent(formattedPhone)}&merchantSlug=${encodeURIComponent(merchant.slug)}`,
+        { cache: 'no-store' }
+      );
+      const data = await res.json();
+
+      if (!res.ok || !data.serial) {
+        toast.error('No encontramos ninguna tarjeta activa con ese número', {
+          description: 'Verifica tu número o regístrate en la pestaña "Nuevo Miembro".',
+        });
+        return;
+      }
+
+      saveActivePassSerial(data.serial);
+      setSelectedPassType(data.passType === 'apple' ? 'apple' : 'google');
+      setRegisteredData({
+        customerName: data.customerName,
+        serialNumber: data.serial,
+        currentStamps: data.currentStamps ?? 1,
+        stampsNeeded: data.stampsNeeded ?? merchant.stamps_needed,
+        passType: data.passType === 'apple' ? 'apple' : 'google',
+        loyaltyTier: (data.loyaltyTier as LoyaltyTier) || 'bronze',
+        totalRewardsRedeemed: data.totalRewardsRedeemed ?? 0,
+        customReward: data.customReward ?? null,
+        discountPercentage: data.discountPercentage ?? null,
       });
-      return;
+
+      setIsRegistered(true);
+      soundEngine.playRedeemCelebration();
+
+      toast.success(`¡Bienvenido de vuelta, ${data.customerName}!`, {
+        description: 'Tu tarjeta ha sido cargada y anclada a este teléfono.',
+      });
+    } catch {
+      toast.error('No fue posible consultar tu tarjeta en este momento');
+    } finally {
+      setIsSubmitting(false);
     }
-
-    const customerPass = store.passes.find((p) => p.customer_id === foundCustomer.id) || store.passes[0];
-    
-    // Guardar para futuros accesos
-    saveActivePassSerial(customerPass.pass_serial_number);
-
-    setRegisteredData({
-      customerName: foundCustomer.full_name,
-      serialNumber: customerPass.pass_serial_number,
-      currentStamps: customerPass.current_stamps || 1,
-    });
-
-    setIsRegistered(true);
-    soundEngine.playRedeemCelebration();
-
-    toast.success(`¡Bienvenido de vuelta, ${foundCustomer.full_name}!`, {
-      description: 'Tu tarjeta ha sido cargada y anclada a este teléfono.',
-    });
   };
 
-  // Desconectar o Cambiar de Cuenta
   const handleSwitchAccount = () => {
     clearActivePassSerial();
+    hasAlertedPrizeRef.current = false;
     setIsRegistered(false);
     setRegisteredData(null);
     setFormMode('create');
     toast.info('Sesión cerrada en este dispositivo. Puedes registrar o abrir otra tarjeta.');
   };
 
+  const handleDownloadApplePass = async () => {
+    const serial = registeredData?.serialNumber;
+    if (!serial) return;
+    try {
+      const res = await fetch(`/api/v1/wallet/apple/download?serial=${encodeURIComponent(serial)}`);
+      if (!res.ok) {
+        const data = (await res.json().catch(() => ({}))) as { message?: string };
+        toast.error('Apple Wallet pendiente de certificados', {
+          description:
+            data.message ||
+            'Puedes usar tu tarjeta en pantalla completa o guardarla en pantalla de inicio mientras se cargan los certificados de Apple.',
+        });
+        return;
+      }
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `${serial}.pkpass`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+      toast.success('Pase Apple Wallet (.pkpass) descargado');
+    } catch {
+      toast.error('Error al descargar el pase de Apple Wallet');
+    }
+  };
+
+  const previewSerial = registeredData?.serialNumber || 'PASS-PREVIEW-001';
+  const previewName = registeredData?.customerName || fullName.trim() || 'Tu Nombre VIP';
+  const previewStamps = registeredData?.currentStamps ?? 1;
+  const previewTier: LoyaltyTier = registeredData?.loyaltyTier || 'bronze';
+  const previewRedeemed = registeredData?.totalRewardsRedeemed ?? 0;
+
   return (
     <div className="min-h-screen bg-background relative overflow-hidden flex flex-col justify-between text-left">
-      {/* Luz Ambiental de Fondo */}
       <div className="absolute top-1/4 left-1/2 -translate-x-1/2 w-[700px] h-[350px] bg-brand-600/15 blur-[140px] pointer-events-none rounded-full" />
       <div className="absolute bottom-0 right-0 w-[500px] h-[300px] bg-champagne/10 blur-[130px] pointer-events-none rounded-full" />
 
-      {/* Header Superior Limpio con Identidad del Negocio */}
       <header className="border-b border-white/[0.08] bg-surface-200/80 backdrop-blur-md sticky top-0 z-30">
         <div className="max-w-6xl mx-auto px-4 sm:px-6 h-16 flex items-center justify-between">
           <div className="flex items-center gap-3">
@@ -364,7 +471,7 @@ export default function HomePage() {
             </div>
             <div>
               <span className="text-sm font-bold text-white tracking-tight flex items-center gap-1.5">
-                {store.merchant.name}
+                {merchant.name}
               </span>
               <span className="text-[10px] text-zinc-400 font-mono block">Club de Lealtad Digital</span>
             </div>
@@ -372,10 +479,8 @@ export default function HomePage() {
         </div>
       </header>
 
-      {/* CUERPO PRINCIPAL: FORMULARIO DE ALTA Y PREVIEW DE LA TARJETA EN VIVO */}
-      <main className="max-w-6xl w-full mx-auto px-4 sm:px-6 py-8 sm:py-12 flex-1 flex flex-col justify-center">
+      <main className="max-w-6xl w-full mx-auto px-4 sm:px-6 py-8 sm:py-12 flex-1 flex flex-col justify-center relative z-10">
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-8 lg:gap-12 items-center">
-          {/* COLUMNA IZQUIERDA: Formulario de Registro o Descarga del Pase */}
           <div className="space-y-6">
             <div>
               <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-purple-500/10 border border-purple-500/30 text-xs text-purple-300 font-mono mb-3">
@@ -392,7 +497,6 @@ export default function HomePage() {
 
             {!isRegistered ? (
               <div className="space-y-4">
-                {/* Tabs: Nuevo Miembro vs Ya Tengo Tarjeta */}
                 <div className="flex rounded-xl bg-surface-100/90 p-1 border border-white/10">
                   <button
                     type="button"
@@ -421,22 +525,31 @@ export default function HomePage() {
                 </div>
 
                 {formMode === 'create' ? (
-                  <form onSubmit={handleRegisterSubmit} className="space-y-4 bg-surface-200/90 border border-white/10 rounded-2xl p-6 sm:p-7 shadow-doppelrand">
+                  <form
+                    onSubmit={handleRegisterSubmit}
+                    className="space-y-4 bg-surface-200/90 border border-white/10 rounded-2xl p-6 sm:p-7 shadow-doppelrand"
+                  >
                     <div>
-                      <label className="text-xs font-mono text-zinc-300 block mb-1">Nombre Completo *</label>
+                      <label htmlFor="home-full-name" className="text-xs font-mono text-zinc-300 block mb-1">
+                        Nombre Completo *
+                      </label>
                       <input
+                        id="home-full-name"
                         type="text"
                         required
                         value={fullName}
                         onChange={(e) => setFullName(e.target.value)}
-                        placeholder="Ej: Carlos Mendoza"
+                        placeholder="Ej: Sofía Herrera"
                         className="w-full bg-surface-100 border border-white/10 rounded-lg px-3.5 py-2.5 text-sm text-white placeholder-zinc-500 focus:outline-none focus:border-brand-500"
                       />
                     </div>
 
                     <div>
-                      <label className="text-xs font-mono text-zinc-300 block mb-1">WhatsApp / Móvil *</label>
+                      <label htmlFor="home-phone" className="text-xs font-mono text-zinc-300 block mb-1">
+                        WhatsApp / Móvil *
+                      </label>
                       <input
+                        id="home-phone"
                         type="tel"
                         required
                         value={phone}
@@ -450,13 +563,48 @@ export default function HomePage() {
                     </div>
 
                     <div>
-                      <label className="text-xs font-mono text-zinc-300 block mb-1">Fecha de Cumpleaños (Opcional)</label>
+                      <label htmlFor="home-birthdate" className="text-xs font-mono text-zinc-300 block mb-1">
+                        Fecha de Cumpleaños (Opcional)
+                      </label>
                       <input
+                        id="home-birthdate"
                         type="date"
                         value={birthdate}
                         onChange={(e) => setBirthdate(e.target.value)}
                         className="w-full bg-surface-100 border border-white/10 rounded-lg px-3.5 py-2.5 text-sm text-white focus:outline-none focus:border-brand-500"
                       />
+                    </div>
+
+                    <div>
+                      <span className="text-xs font-mono text-zinc-300 block mb-1.5">
+                        Billetera Móvil Preferida
+                      </span>
+                      <div className="grid grid-cols-2 gap-2">
+                        <button
+                          type="button"
+                          onClick={() => setSelectedPassType('google')}
+                          className={`py-2 px-3 rounded-lg border text-xs font-mono flex items-center justify-center gap-2 transition-all ${
+                            selectedPassType === 'google'
+                              ? 'bg-brand-500/20 border-brand-400 text-white font-bold'
+                              : 'bg-surface-100 border-white/10 text-zinc-400 hover:text-white'
+                          }`}
+                        >
+                          <GoogleColorIcon className="w-4 h-4" />
+                          <span>Google Wallet</span>
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setSelectedPassType('apple')}
+                          className={`py-2 px-3 rounded-lg border text-xs font-mono flex items-center justify-center gap-2 transition-all ${
+                            selectedPassType === 'apple'
+                              ? 'bg-brand-500/20 border-brand-400 text-white font-bold'
+                              : 'bg-surface-100 border-white/10 text-zinc-400 hover:text-white'
+                          }`}
+                        >
+                          <Smartphone className="w-4 h-4 text-champagne" />
+                          <span>Apple Wallet</span>
+                        </button>
+                      </div>
                     </div>
 
                     <div className="flex items-start gap-2 pt-1">
@@ -467,19 +615,36 @@ export default function HomePage() {
                         onChange={(e) => setTermsAccepted(e.target.checked)}
                         className="mt-1 accent-brand-500"
                       />
-                      <label htmlFor="terms" className="text-[11px] text-zinc-400">
-                        Acepto los términos del programa de lealtad y el tratamiento de datos personales conforme a la Ley 1581.
+                      <label htmlFor="terms" className="text-[11px] text-zinc-400 leading-relaxed">
+                        Acepto los{' '}
+                        <Link href="/terms" className="text-champagne hover:underline">
+                          términos del programa
+                        </Link>{' '}
+                        y el{' '}
+                        <Link href="/privacy" className="text-champagne hover:underline">
+                          tratamiento de datos personales (Ley 1581)
+                        </Link>
+                        .
                       </label>
                     </div>
 
-                    <Button type="submit" variant="primary" size="lg" className="w-full mt-2 font-semibold">
+                    <Button
+                      type="submit"
+                      variant="primary"
+                      size="lg"
+                      isLoading={isSubmitting}
+                      disabled={!termsAccepted || isSubmitting}
+                      className="w-full mt-2 font-semibold"
+                    >
                       <Sparkles className="w-4 h-4 mr-2 text-champagne" />
                       Obtener Mi Tarjeta Digital en 10s
                     </Button>
                   </form>
                 ) : (
-                  /* FORMULARIO DE RECUPERACIÓN RÁPIDA DE TARJETA CON WHATSAPP */
-                  <form onSubmit={handleRecoverSubmit} className="space-y-4 bg-surface-200/90 border border-white/10 rounded-2xl p-6 sm:p-7 shadow-doppelrand animate-in fade-in duration-200">
+                  <form
+                    onSubmit={handleRecoverSubmit}
+                    className="space-y-4 bg-surface-200/90 border border-white/10 rounded-2xl p-6 sm:p-7 shadow-doppelrand animate-in fade-in duration-200"
+                  >
                     <div>
                       <span className="text-sm font-bold text-white block mb-1">
                         Encuentra y Abre tu Tarjeta Existente
@@ -487,10 +652,11 @@ export default function HomePage() {
                       <p className="text-xs text-zinc-400 mb-3 leading-relaxed">
                         Ingresa el número de WhatsApp con el que te registraste. Cargaremos tu tarjeta de inmediato con todos tus sellos y rango guardados.
                       </p>
-                      <label className="text-xs font-mono text-zinc-300 block mb-1">
+                      <label htmlFor="home-recover-phone" className="text-xs font-mono text-zinc-300 block mb-1">
                         Tu WhatsApp Registrado *
                       </label>
                       <input
+                        id="home-recover-phone"
                         type="tel"
                         required
                         value={recoverPhone}
@@ -500,7 +666,13 @@ export default function HomePage() {
                       />
                     </div>
 
-                    <Button type="submit" variant="primary" size="lg" className="w-full font-semibold">
+                    <Button
+                      type="submit"
+                      variant="primary"
+                      size="lg"
+                      isLoading={isSubmitting}
+                      className="w-full font-semibold"
+                    >
                       <Search className="w-4 h-4 mr-2" />
                       Buscar y Cargar Mi Tarjeta
                     </Button>
@@ -508,9 +680,7 @@ export default function HomePage() {
                 )}
               </div>
             ) : (
-              /* ESTADO POST-REGISTRO EXITOSO / TARJETA ACTIVA EN EL TELÉFONO */
               <div className="space-y-4 bg-surface-200/95 border border-emerald-500/30 rounded-2xl p-6 sm:p-7 shadow-glow-purple animate-in fade-in duration-300">
-                {/* Badge de Tarjeta Anclada y Opción de Cambio */}
                 <div className="flex items-center justify-between p-3 rounded-xl bg-emerald-500/10 border border-emerald-500/30">
                   <div className="flex items-center gap-2.5">
                     <CheckCircle2 className="w-5 h-5 text-emerald-400 shrink-0" />
@@ -524,6 +694,7 @@ export default function HomePage() {
                     </div>
                   </div>
                   <button
+                    type="button"
                     onClick={handleSwitchAccount}
                     className="text-[11px] text-zinc-400 hover:text-white underline font-mono ml-2 shrink-0"
                     title="Cerrar sesión o cambiar de tarjeta"
@@ -537,17 +708,30 @@ export default function HomePage() {
                 </p>
 
                 <div className="pt-2 space-y-3">
-                  {/* Botón Oficial Google Wallet con los 4 Colores */}
-                  <button
-                    type="button"
-                    onClick={() => setShowGoogleWalletModal(true)}
-                    className="w-full bg-white hover:bg-zinc-100 text-zinc-950 font-bold py-3.5 px-4 rounded-xl flex items-center justify-center gap-3 shadow-lg hover:shadow-xl transition-all active:scale-[0.98] border border-white/20"
-                  >
-                    <GoogleColorIcon className="w-5 h-5 shrink-0" />
-                    <span className="text-sm font-semibold tracking-tight">Agregar a Google Wallet</span>
-                  </button>
+                  {(registeredData?.passType === 'apple' || isIosDevice) && (
+                    <button
+                      type="button"
+                      onClick={handleDownloadApplePass}
+                      className="w-full bg-zinc-950 hover:bg-zinc-900 text-white font-bold py-3.5 px-4 rounded-xl flex items-center justify-center gap-3 shadow-lg transition-all active:scale-[0.98] border border-white/25"
+                    >
+                      <Download className="w-5 h-5 text-champagne shrink-0" />
+                      <span className="text-sm font-semibold tracking-tight">
+                        Añadir a Apple Wallet (.pkpass)
+                      </span>
+                    </button>
+                  )}
 
-                  {/* Botón para Abrir la Tarjeta en Pantalla Completa Móvil */}
+                  {(registeredData?.passType === 'google' || !isIosDevice) && (
+                    <button
+                      type="button"
+                      onClick={() => setShowGoogleWalletModal(true)}
+                      className="w-full bg-white hover:bg-zinc-100 text-zinc-950 font-bold py-3.5 px-4 rounded-xl flex items-center justify-center gap-3 shadow-lg hover:shadow-xl transition-all active:scale-[0.98] border border-white/20"
+                    >
+                      <GoogleColorIcon className="w-5 h-5 shrink-0" />
+                      <span className="text-sm font-semibold tracking-tight">Agregar a Google Wallet</span>
+                    </button>
+                  )}
+
                   <Button
                     variant="outline"
                     size="md"
@@ -558,16 +742,25 @@ export default function HomePage() {
                     <span>Ver en Pantalla Completa (Presentar en Caja)</span>
                   </Button>
 
-                  {/* Respaldo Discreto en WhatsApp */}
+                  <Button
+                    variant="secondary"
+                    size="sm"
+                    onClick={() => setShowSaveToPhoneModal(true)}
+                    className="w-full text-xs flex items-center justify-center gap-2"
+                  >
+                    <Smartphone className="w-3.5 h-3.5 text-brand-400" />
+                    <span>Guardar en Pantalla de Inicio</span>
+                  </Button>
+
                   <button
                     type="button"
                     onClick={() => {
                       const link = generateWhatsAppPassLink(
-                        store.merchant.name, 
-                        registeredData?.customerName || 'Cliente VIP', 
-                        registeredData?.serialNumber || 'PASS-CANELO-001'
+                        merchant.name,
+                        registeredData?.customerName || 'Cliente VIP',
+                        registeredData?.serialNumber || ''
                       );
-                      window.open(link, '_blank');
+                      window.open(link, '_blank', 'noopener,noreferrer');
                     }}
                     className="w-full py-1 text-center text-xs text-zinc-400 hover:text-emerald-400 flex items-center justify-center gap-1.5 transition-colors"
                   >
@@ -579,52 +772,40 @@ export default function HomePage() {
             )}
           </div>
 
-          {/* COLUMNA DERECHA: Renderizado de la Tarjeta en Tiempo Real con su QR y Sellos */}
           <div className="flex flex-col items-center justify-center">
-            {(() => {
-              const serial = registeredData?.serialNumber || 'PASS-CANELO-001';
-              const pass = store.passes.find((p) => p.pass_serial_number === serial);
-              const customer = pass ? store.customers.find((c) => c.id === pass.customer_id) : (registeredData ? null : store.customers[0]);
-              // Un cliente recién registrado arranca en 'bronze', o el rango que le corresponda
-              const tier = registeredData 
-                ? 'bronze' 
-                : (customer?.loyalty_tier || calculateCustomerTier(pass?.total_rewards_redeemed || 0, store.merchant.tier_config));
-
-              return (
-                <LivePassPreview
-                  merchantName={store.merchant.name}
-                  customerName={registeredData?.customerName || fullName || 'Carlos Mendoza'}
-                  passSerialNumber={serial}
-                  currentStamps={registeredData?.currentStamps || (customer ? (pass?.current_stamps || 1) : 1)}
-                  totalNeeded={store.merchant.stamps_needed}
-                  rewardDescription={store.merchant.reward_description}
-                  passType={selectedPassType}
-                  brandColor={store.merchant.brand_color}
-                  loyaltyTier={tier}
-                  totalRewardsRedeemed={registeredData ? 0 : (pass?.total_rewards_redeemed || 0)}
-                  customReward={registeredData ? null : (customer?.custom_reward || null)}
-                  discountPercentage={registeredData ? null : (customer?.discount_percentage || null)}
-                  loyaltyProgramMode={store.merchant.loyalty_program_mode}
-                  cardMorphology={store.merchant.card_morphology}
-                  cardGradient={store.merchant.card_gradient}
-                  rewardMilestones={store.merchant.reward_milestones}
-                  cardPattern={store.merchant.card_pattern}
-                  showEmvChip={store.merchant.show_emv_chip}
-                  showHologram={store.merchant.show_hologram}
-                />
-              );
-            })()}
+            <LivePassPreview
+              merchantName={merchant.name}
+              customerName={previewName}
+              passSerialNumber={previewSerial}
+              currentStamps={previewStamps}
+              totalNeeded={registeredData?.stampsNeeded ?? merchant.stamps_needed}
+              rewardDescription={merchant.reward_description}
+              passType={registeredData?.passType ?? selectedPassType}
+              brandColor={merchant.brand_color}
+              loyaltyTier={previewTier}
+              totalRewardsRedeemed={previewRedeemed}
+              customReward={registeredData?.customReward ?? null}
+              discountPercentage={registeredData?.discountPercentage ?? null}
+              loyaltyProgramMode={merchant.loyalty_program_mode}
+              cardMorphology={merchant.card_morphology}
+              cardGradient={merchant.card_gradient}
+              rewardMilestones={merchant.reward_milestones}
+              cardPattern={merchant.card_pattern}
+              showEmvChip={merchant.show_emv_chip}
+              showHologram={merchant.show_hologram}
+            />
           </div>
         </div>
       </main>
 
-      {/* MODAL INMERSIVO DE PASE EN PANTALLA COMPLETA PARA MÓVILES */}
       {showMobilePassModal && (
         <div className="fixed inset-0 z-50 bg-black/90 backdrop-blur-md flex flex-col items-center justify-center p-4 animate-in fade-in duration-200">
-          <div className="w-full max-w-sm relative">
+          <div className="w-full max-w-sm max-h-[90vh] overflow-y-auto custom-scrollbar relative pt-10">
             <button
+              type="button"
               onClick={() => setShowMobilePassModal(false)}
-              className="absolute -top-12 right-0 p-2 text-zinc-400 hover:text-white bg-white/10 rounded-full"
+              aria-label="Cerrar vista de pantalla completa"
+              className="absolute top-0 right-0 p-2 text-zinc-400 hover:text-white bg-white/10 rounded-full"
             >
               <X className="w-5 h-5" />
             </button>
@@ -636,80 +817,74 @@ export default function HomePage() {
                 Presenta este código en el mostrador para sumar sellos o canjear
               </span>
             </div>
-            {(() => {
-              const serial = registeredData?.serialNumber || 'PASS-CANELO-001';
-              const pass = store.passes.find((p) => p.pass_serial_number === serial);
-              const customer = pass ? store.customers.find((c) => c.id === pass.customer_id) : (registeredData ? null : store.customers[0]);
-              const tier = registeredData 
-                ? 'bronze' 
-                : (customer?.loyalty_tier || calculateCustomerTier(pass?.total_rewards_redeemed || 0, store.merchant.tier_config));
-
-              return (
-                <LivePassPreview
-                  merchantName={store.merchant.name}
-                  customerName={registeredData?.customerName || fullName || 'Carlos Mendoza'}
-                  passSerialNumber={serial}
-                  currentStamps={registeredData?.currentStamps || (customer ? (pass?.current_stamps || 1) : 1)}
-                  totalNeeded={store.merchant.stamps_needed}
-                  rewardDescription={store.merchant.reward_description}
-                  passType={selectedPassType}
-                  brandColor={store.merchant.brand_color}
-                  loyaltyTier={tier}
-                  totalRewardsRedeemed={registeredData ? 0 : (pass?.total_rewards_redeemed || 0)}
-                  customReward={registeredData ? null : (customer?.custom_reward || null)}
-                  discountPercentage={registeredData ? null : (customer?.discount_percentage || null)}
-                  loyaltyProgramMode={store.merchant.loyalty_program_mode}
-                  cardMorphology={store.merchant.card_morphology}
-                  cardGradient={store.merchant.card_gradient}
-                  rewardMilestones={store.merchant.reward_milestones}
-                  cardPattern={store.merchant.card_pattern}
-                  showEmvChip={store.merchant.show_emv_chip}
-                  showHologram={store.merchant.show_hologram}
-                />
-              );
-            })()}
+            <LivePassPreview
+              merchantName={merchant.name}
+              customerName={previewName}
+              passSerialNumber={previewSerial}
+              currentStamps={previewStamps}
+              totalNeeded={registeredData?.stampsNeeded ?? merchant.stamps_needed}
+              rewardDescription={merchant.reward_description}
+              passType={registeredData?.passType ?? selectedPassType}
+              brandColor={merchant.brand_color}
+              loyaltyTier={previewTier}
+              totalRewardsRedeemed={previewRedeemed}
+              customReward={registeredData?.customReward ?? null}
+              discountPercentage={registeredData?.discountPercentage ?? null}
+              loyaltyProgramMode={merchant.loyalty_program_mode}
+              cardMorphology={merchant.card_morphology}
+              cardGradient={merchant.card_gradient}
+              rewardMilestones={merchant.reward_milestones}
+              cardPattern={merchant.card_pattern}
+              showEmvChip={merchant.show_emv_chip}
+              showHologram={merchant.show_hologram}
+            />
           </div>
         </div>
       )}
 
-      {/* MODAL OFICIAL / ASISTENTE DE GOOGLE WALLET */}
       <GoogleWalletSaveModal
         isOpen={showGoogleWalletModal}
         onClose={() => setShowGoogleWalletModal(false)}
-        customerName={registeredData?.customerName || fullName || 'Carlos Mendoza'}
-        serialNumber={registeredData?.serialNumber || 'PASS-CANELO-001'}
-        currentStamps={registeredData?.currentStamps || 1}
-        totalNeeded={store.merchant.stamps_needed}
-        tierName="BRONCE"
+        customerName={previewName}
+        serialNumber={previewSerial}
+        currentStamps={previewStamps}
+        totalNeeded={registeredData?.stampsNeeded ?? merchant.stamps_needed}
+        merchantName={merchant.name}
+        tierName={previewTier.toUpperCase()}
         onOpenFullScreenPass={() => setShowMobilePassModal(true)}
       />
 
-      {/* MODAL DE GUARDADO EN PANTALLA DE INICIO & NOTIFICACIONES PUSH */}
       <SavePassToPhoneModal
         isOpen={showSaveToPhoneModal}
         onClose={() => setShowSaveToPhoneModal(false)}
-        customerName={registeredData?.customerName || fullName || 'Carlos Mendoza'}
-        serialNumber={registeredData?.serialNumber || 'PASS-CANELO-001'}
-        merchantName={store.merchant.name}
+        customerName={previewName}
+        serialNumber={previewSerial}
+        merchantName={merchant.name}
       />
 
-      {/* MODAL DE PREMIO DESBLOQUEADO EN VIVO */}
       <PremioDesbloqueadoModal
         isOpen={showPrizeUnlockedModal}
         onClose={() => setShowPrizeUnlockedModal(false)}
-        customerName={registeredData?.customerName || fullName || 'Cliente'}
-        serialNumber={registeredData?.serialNumber || 'PASS-CANELO-001'}
-        rewardDescription={unlockedPrizeData?.reward || store.merchant.reward_description}
-        stampsCount={unlockedPrizeData?.stamps || store.merchant.stamps_needed}
-        merchantName={store.merchant.name}
+        customerName={previewName}
+        serialNumber={previewSerial}
+        rewardDescription={unlockedPrizeData?.reward || merchant.reward_description}
+        stampsCount={unlockedPrizeData?.stamps || merchant.stamps_needed}
+        merchantName={merchant.name}
         onOpenMobilePass={() => setShowMobilePassModal(true)}
       />
 
-      {/* Footer Minimalista 100% Comercial y Limpio (Sin accesos al DSB) */}
-      <footer className="border-t border-white/[0.06] bg-black/40 py-4 text-center text-xs text-zinc-500 font-mono">
-        <p>
-          Café Canelo & Specialty Roasters · Club de Lealtad Digital · Google Wallet & Apple Wallet
-        </p>
+      <footer className="border-t border-white/[0.06] bg-black/40 py-4 px-4 text-center text-xs text-zinc-500 font-mono relative z-10">
+        <div className="max-w-6xl mx-auto flex flex-col sm:flex-row items-center justify-between gap-2">
+          <p>{merchant.name} · Club de Lealtad Digital · Google Wallet &amp; Apple Wallet</p>
+          <div className="flex items-center gap-4">
+            <Link href="/terms" className="hover:text-zinc-300">
+              Términos
+            </Link>
+            <Link href="/privacy" className="hover:text-zinc-300">
+              Privacidad
+            </Link>
+          </div>
+        </div>
       </footer>
     </div>
   );

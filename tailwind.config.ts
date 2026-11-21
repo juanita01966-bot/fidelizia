@@ -16,6 +16,7 @@ const config: Config = {
           50: "#18181b",
           100: "#121215",
           200: "#0e0e11",
+          300: "#09090c",
           DEFAULT: "#0b0b0e",
         },
         brand: {
@@ -27,6 +28,7 @@ const config: Config = {
           500: "#8b5cf6",
           600: "#7c3aed",
           700: "#6d28d9",
+          950: "#1e1038",
           DEFAULT: "#8b5cf6",
         },
         champagne: {
@@ -40,10 +42,14 @@ const config: Config = {
           dark: "#059669",
         },
       },
+      spacing: {
+        13: "3.25rem",
+      },
       boxShadow: {
         doppelrand: "0 0 0 1px rgba(255,255,255,0.08), 0 0 0 2px rgba(255,255,255,0.02)",
         "glow-purple": "0 0 35px -5px rgba(139, 92, 246, 0.35)",
         "glow-gold": "0 0 35px -5px rgba(212, 163, 115, 0.3)",
+        "glow-emerald": "0 0 35px -5px rgba(16, 185, 129, 0.35)",
       },
       borderRadius: {
         none: "0px",
@@ -56,11 +62,17 @@ const config: Config = {
       animation: {
         "pulse-slow": "pulse 3s cubic-bezier(0.4, 0, 0.6, 1) infinite",
         "laser-scan": "laser 2s ease-in-out infinite",
+        shake: "shake 0.36s cubic-bezier(0.36, 0.07, 0.19, 0.97) both",
       },
       keyframes: {
         laser: {
           "0%, 100%": { transform: "translateY(0%)", opacity: "0.8" },
           "50%": { transform: "translateY(100%)", opacity: "1" },
+        },
+        shake: {
+          "0%, 100%": { transform: "translateX(0)" },
+          "20%, 60%": { transform: "translateX(-6px)" },
+          "40%, 80%": { transform: "translateX(6px)" },
         },
       },
     },
